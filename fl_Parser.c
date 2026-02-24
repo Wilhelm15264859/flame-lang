@@ -30,7 +30,6 @@ Node *make_node(NodeType type, const char *str) {
     return n;
 }
 
-/* ─── forward declarations ─────────────────────────────────────── */
 static Node *expr_or(void);
 
 Node parseVarDef(void);
@@ -42,7 +41,6 @@ Node parseWhile(void);
 Node parseFuncCall(Token t);
 Node *parseExpr(void);
 
-/* ─── главный диспетчер ────────────────────────────────────────── */
 Node parsing(void) {
     Token current = advance();
 
@@ -73,7 +71,6 @@ Node parsing(void) {
     return error;
 }
 
-/* ─── точка входа парсера ──────────────────────────────────────── */
 vector_node *parse(int it, vector_token* tokenss) {
     i = it;
     tokens = tokenss;
@@ -91,7 +88,6 @@ vector_node *parse(int it, vector_token* tokenss) {
     return nodes;
 }
 
-/* ─── вызов функции ────────────────────────────────────────────── */
 Node parseFuncCall(Token t) {
     Node call;
     call.childs = malloc(sizeof(vector_node));
@@ -99,7 +95,6 @@ Node parseFuncCall(Token t) {
     strncpy(call.str, t.value, 63);
     call.str[63] = '\0';
 
-    /* имя функции как первый ребёнок */
     Node *name = make_node(NODE_IDENT, t.value);
     vn_push_back(call.childs, *name);
     free(name);
@@ -107,7 +102,7 @@ Node parseFuncCall(Token t) {
     Node *args = make_node(NODE_ARGS, "");
 
     if (strcmp(peek(0).value, "(") == 0) {
-        advance();  /* съедаем '(' */
+        advance();
 
         while (strcmp(peek(0).value, ")") != 0) {
             if (peek(0).type == TOK_EOF) {
@@ -120,13 +115,13 @@ Node parseFuncCall(Token t) {
                 free(thing);
             }
             if (peek(0).type == TOK_COMMA)
-                advance();  /* съедаем ',' */
+                advance();
             else
                 break;
         }
 
         if (strcmp(peek(0).value, ")") == 0)
-            advance();  /* съедаем ')' */
+            advance();
         else
             printf("Error: expected ')' in function call\n");
     } else {
@@ -142,7 +137,6 @@ Node parseFuncCall(Token t) {
     return call;
 }
 
-/* ─── while ────────────────────────────────────────────────────── */
 Node parseWhile(void) {
     Node whilex;
     whilex.childs = malloc(sizeof(vector_node));
@@ -175,7 +169,7 @@ Node parseWhile(void) {
             else
                 printf("Error in while scope\n");
         }
-        advance();  /* съедаем '}' */
+        advance();
         vn_push_back(whilex.childs, *scope);
         free(scope);
     } else {
@@ -187,7 +181,6 @@ Node parseWhile(void) {
     return whilex;
 }
 
-/* ─── else ─────────────────────────────────────────────────────── */
 Node parseElse(void) {
     Node elseexpr;
     elseexpr.childs = malloc(sizeof(vector_node));
@@ -207,7 +200,7 @@ Node parseElse(void) {
             else
                 printf("Error in else scope\n");
         }
-        advance();  /* съедаем '}' */
+        advance();
         vn_push_back(elseexpr.childs, *scope);
         free(scope);
     } else {
@@ -219,7 +212,6 @@ Node parseElse(void) {
     return elseexpr;
 }
 
-/* ─── if ───────────────────────────────────────────────────────── */
 Node parseIf(void) {
     Node ifexpr;
     ifexpr.childs = malloc(sizeof(vector_node));
@@ -252,7 +244,7 @@ Node parseIf(void) {
             else
                 printf("Error in if scope\n");
         }
-        advance();  /* съедаем '}' */
+        advance();
         vn_push_back(ifexpr.childs, *scope);
         free(scope);
     } else {
@@ -264,7 +256,6 @@ Node parseIf(void) {
     return ifexpr;
 }
 
-/* ─── объявление функции ───────────────────────────────────────── */
 Node parseFuncDef(void) {
     Node func;
     func.childs = malloc(sizeof(vector_node));
@@ -291,7 +282,6 @@ Node parseFuncDef(void) {
     current = advance();
     if (strcmp(current.value, "(") == 0) {
         if (strcmp(peek(0).value, ")") == 0) {
-            /* пустые параметры */
             Node *params = make_node(NODE_PARAMS, "");
             vn_push_back(func.childs, *params);
             free(params);
@@ -321,7 +311,7 @@ Node parseFuncDef(void) {
             else
                 printf("Error in function scope\n");
         }
-        advance();  /* съедаем '}' */
+        advance();
         vn_push_back(func.childs, *scope);
         free(scope);
     } else {
@@ -332,7 +322,6 @@ Node parseFuncDef(void) {
     return func;
 }
 
-/* ─── параметры функции ────────────────────────────────────────── */
 Node parseParams(void) {
     Node params;
     params.childs = malloc(sizeof(vector_node));
@@ -376,7 +365,6 @@ Node parseParams(void) {
     return params;
 }
 
-/* ─── объявление переменной ────────────────────────────────────── */
 Node parseVarDef(void) {
     Node var;
     var.childs = malloc(sizeof(vector_node));
@@ -400,9 +388,8 @@ Node parseVarDef(void) {
         printf("Error: expected identifier\n");
     }
 
-    /* проверяем '=' через peek — не съедаем лишний токен */
     if (strcmp(peek(0).value, "=") == 0) {
-        advance();  /* съедаем '=' */
+        advance();
         Node *expr = parseExpr();
         if (expr) {
             vn_push_back(var.childs, *expr);
@@ -422,8 +409,6 @@ Node parseVarDef(void) {
     return var;
 }
 
-/* ═══ Парсер выражений ═════════════════════════════════════════════ */
-
 static Node *expr_primary(void) {
     Token t = peek(0);
 
@@ -440,7 +425,6 @@ static Node *expr_primary(void) {
     if (t.type == TOK_IDENT) {
         advance();
 
-        /* вызов функции foo(...) */
         if (strcmp(peek(0).value, "(") == 0) {
             Node call = parseFuncCall(t);
             Node *n   = malloc(sizeof(Node));
@@ -448,7 +432,6 @@ static Node *expr_primary(void) {
             return n;
         }
 
-        /* индексация arr[i] */
         if (strcmp(peek(0).value, "[") == 0) {
             advance();
             Node *idx  = expr_or();
@@ -467,7 +450,6 @@ static Node *expr_primary(void) {
         return make_node(NODE_VAR, t.value);
     }
 
-    /* скобочное выражение */
     if (strcmp(t.value, "(") == 0) {
         advance();
         Node *inner = expr_or();

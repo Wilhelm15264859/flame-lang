@@ -6,14 +6,12 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* ─── Таблица символов (переменные и функции) ──────────────────── */
-
 #define MAX_SYMS 256
 
 typedef struct {
     char         name[64];
-    LLVMValueRef value;   /* для переменных — alloca ptr, для функций — LLVMValueRef функции */
-    LLVMTypeRef  type;    /* тип значения (не указателя) */
+    LLVMValueRef value;
+    LLVMTypeRef  type;
     int          is_func;
 } Symbol;
 
@@ -42,15 +40,10 @@ static Symbol *sym_lookup(const char *name) {
 static int sym_checkpoint(void) { return sym_count; }
 static void sym_restore(int cp) { sym_count = cp; }
 
-/* ─── Глобальный контекст кодогенератора ──────────────────────── */
-
 static LLVMContextRef ctx;
 static LLVMModuleRef  mod;
 static LLVMBuilderRef builder;
 
-/* ─── Вспомогательные функции ──────────────────────────────────── */
-
-/* получить LLVM тип по строке */
 static LLVMTypeRef llvm_type_from_str(const char *s) {
     if (strcmp(s, "int")    == 0) return LLVMInt32TypeInContext(ctx);
     if (strcmp(s, "short")  == 0) return LLVMInt16TypeInContext(ctx);
@@ -68,10 +61,7 @@ static int type_is_float(LLVMTypeRef t) {
            t == LLVMDoubleTypeInContext(ctx);
 }
 
-/* ─── forward declaration ──────────────────────────────────────── */
 static LLVMValueRef codegen_node(Node *n);
-
-/* ─── Генерация выражений ──────────────────────────────────────── */
 
 static LLVMValueRef codegen_number(Node *n) {
     return LLVMConstInt(LLVMInt32TypeInContext(ctx), atoi(n->str), 1);
@@ -87,7 +77,6 @@ static LLVMValueRef codegen_var(Node *n) {
         fprintf(stderr, "codegen error: undefined variable '%s'\n", n->str);
         return NULL;
     }
-    /* загружаем значение из alloca */
     return LLVMBuildLoad2(builder, s->type, s->value, n->str);
 }
 
@@ -118,7 +107,6 @@ static LLVMValueRef codegen_binop(Node *n) {
     if (strcmp(op, "%") == 0)
         return LLVMBuildSRem(builder, left, right, "rem");
 
-    /* сравнения — возвращают i1, расширяем до i32 */
     LLVMValueRef cmp = NULL;
     if (strcmp(op, "==") == 0)
         cmp = is_fp ? LLVMBuildFCmp(builder, LLVMRealOEQ, left, right, "eq")
@@ -187,8 +175,6 @@ static LLVMValueRef codegen_index(Node *n) {
     return LLVMBuildLoad2(builder, LLVMInt32TypeInContext(ctx), ptr, "elem");
 }
 
-/* ─── Объявление переменной ────────────────────────────────────── */
-
 static LLVMValueRef codegen_var_def(Node *n) {
     if (n->childs->size < 2) return NULL;
 
@@ -196,11 +182,9 @@ static LLVMValueRef codegen_var_def(Node *n) {
     const char  *name     = n->childs->data[1].str;
     LLVMTypeRef  lltype   = llvm_type_from_str(type_str);
 
-    // Проверяем, находимся ли мы внутри функции
     LLVMBasicBlockRef cur_block = LLVMGetInsertBlock(builder);
 
     if (cur_block) {
-        // Локальная переменная
         LLVMValueRef ptr = LLVMBuildAlloca(builder, lltype, name);
         sym_push(name, ptr, lltype, 0);
         
@@ -210,19 +194,14 @@ static LLVMValueRef codegen_var_def(Node *n) {
         }
         return ptr;
     } else {
-        // Глобальная переменная
         LLVMValueRef global_var = LLVMAddGlobal(mod, lltype, name);
-        // Глобальные переменные требуют константной инициализации
         LLVMSetInitializer(global_var, LLVMConstNull(lltype)); 
         sym_push(name, global_var, lltype, 0);
         return global_var;
     }
 }
 
-/* ─── Вызов функции ────────────────────────────────────────────── */
-
 static LLVMValueRef codegen_func_call(Node *n) {
-    /* str = имя функции, дети: [NODE_IDENT(имя), NODE_ARGS(аргументы)] */
     const char *fname = n->str;
     Symbol     *s     = sym_lookup(fname);
 
@@ -233,7 +212,6 @@ static LLVMValueRef codegen_func_call(Node *n) {
         func  = s->value;
         ftype = s->type;
     } else {
-        /* функция не в таблице — ищем в модуле (внешняя) */
         func = LLVMGetNamedFunction(mod, fname);
         if (!func) {
             fprintf(stderr, "codegen error: undefined function '%s'\n", fname);
@@ -242,7 +220,6 @@ static LLVMValueRef codegen_func_call(Node *n) {
         ftype = LLVMGlobalGetValueType(func);
     }
 
-    /* собираем аргументы из NODE_ARGS */
     LLVMValueRef args[64];
     unsigned     argc = 0;
 
@@ -259,16 +236,12 @@ static LLVMValueRef codegen_func_call(Node *n) {
                           returns_void ? "" : "call");
 }
 
-/* ─── if ───────────────────────────────────────────────────────── */
-
 static LLVMValueRef codegen_if(Node *n, LLVMValueRef func) {
-    /* дети: [expr, NODE_SCOPE] или [expr, NODE_SCOPE, NODE_ELSE] */
     if (n->childs->size < 2) return NULL;
 
     LLVMValueRef cond = codegen_node(&n->childs->data[0]);
     if (!cond) return NULL;
 
-    /* cond != 0 */
     LLVMValueRef zero     = LLVMConstInt(LLVMTypeOf(cond), 0, 0);
     LLVMValueRef cond_i1  = LLVMBuildICmp(builder, LLVMIntNE, cond, zero, "ifcond");
 
@@ -278,14 +251,12 @@ static LLVMValueRef codegen_if(Node *n, LLVMValueRef func) {
 
     LLVMBuildCondBr(builder, cond_i1, then_bb, else_bb);
 
-    /* then */
     LLVMPositionBuilderAtEnd(builder, then_bb);
     int cp = sym_checkpoint();
     codegen_node(&n->childs->data[1]);
     sym_restore(cp);
     LLVMBuildBr(builder, merge_bb);
 
-    /* else */
     LLVMPositionBuilderAtEnd(builder, else_bb);
     if (n->childs->size >= 3)
         codegen_node(&n->childs->data[2]);
@@ -294,8 +265,6 @@ static LLVMValueRef codegen_if(Node *n, LLVMValueRef func) {
     LLVMPositionBuilderAtEnd(builder, merge_bb);
     return NULL;
 }
-
-/* ─── while ────────────────────────────────────────────────────── */
 
 static LLVMValueRef codegen_while(Node *n, LLVMValueRef func) {
     if (n->childs->size < 2) return NULL;
@@ -306,14 +275,12 @@ static LLVMValueRef codegen_while(Node *n, LLVMValueRef func) {
 
     LLVMBuildBr(builder, cond_bb);
 
-    /* условие */
     LLVMPositionBuilderAtEnd(builder, cond_bb);
     LLVMValueRef cond    = codegen_node(&n->childs->data[0]);
     LLVMValueRef zero    = LLVMConstInt(LLVMTypeOf(cond), 0, 0);
     LLVMValueRef cond_i1 = LLVMBuildICmp(builder, LLVMIntNE, cond, zero, "wcond");
     LLVMBuildCondBr(builder, cond_i1, body_bb, end_bb);
 
-    /* тело */
     LLVMPositionBuilderAtEnd(builder, body_bb);
     int cp = sym_checkpoint();
     codegen_node(&n->childs->data[1]);
@@ -324,8 +291,6 @@ static LLVMValueRef codegen_while(Node *n, LLVMValueRef func) {
     return NULL;
 }
 
-/* ─── scope ────────────────────────────────────────────────────── */
-
 static LLVMValueRef codegen_scope(Node *n) {
     int cp = sym_checkpoint();
     for (unsigned long long j = 0; j < n->childs->size; j++)
@@ -334,10 +299,7 @@ static LLVMValueRef codegen_scope(Node *n) {
     return NULL;
 }
 
-/* ─── объявление функции ───────────────────────────────────────── */
-
 static LLVMValueRef codegen_func_def(Node *n) {
-    /* дети: [NODE_TYPE, NODE_IDENT, NODE_PARAMS, NODE_SCOPE] */
     if (n->childs->size < 4) return NULL;
 
     const char  *ret_str  = n->childs->data[0].str;
@@ -346,14 +308,12 @@ static LLVMValueRef codegen_func_def(Node *n) {
     Node        *scope    = &n->childs->data[3];
     LLVMTypeRef  ret_type = llvm_type_from_str(ret_str);
 
-    /* собираем типы параметров */
     LLVMTypeRef param_types[64];
     unsigned    param_count = 0;
 
     if (params->type == NODE_PARAMS) {
         for (unsigned long long j = 0; j < params->childs->size && param_count < 64; j++) {
             Node *param = &params->childs->data[j];
-            /* param дети: [NODE_TYPE, NODE_IDENT] */
             if (param->childs->size >= 1)
                 param_types[param_count++] = llvm_type_from_str(param->childs->data[0].str);
         }
@@ -362,14 +322,11 @@ static LLVMValueRef codegen_func_def(Node *n) {
     LLVMTypeRef  func_type = LLVMFunctionType(ret_type, param_types, param_count, 0);
     LLVMValueRef func      = LLVMAddFunction(mod, fname, func_type);
 
-    /* регистрируем функцию до генерации тела (рекурсия) */
     sym_push(fname, func, func_type, 1);
 
-    /* entry блок */
     LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(ctx, func, "entry");
     LLVMPositionBuilderAtEnd(builder, entry);
 
-    /* alloca для параметров */
     int cp = sym_checkpoint();
     if (params->type == NODE_PARAMS) {
         for (unsigned long long j = 0; j < params->childs->size && j < param_count; j++) {
@@ -383,11 +340,9 @@ static LLVMValueRef codegen_func_def(Node *n) {
         }
     }
 
-    /* генерируем тело */
     for (unsigned long long j = 0; j < scope->childs->size; j++)
         codegen_node(&scope->childs->data[j]);
 
-    /* если блок не завершён — добавляем ret */
     LLVMBasicBlockRef cur_block = LLVMGetInsertBlock(builder);
     if (!LLVMGetBasicBlockTerminator(cur_block)) {
         if (LLVMGetTypeKind(ret_type) == LLVMVoidTypeKind)
@@ -400,12 +355,9 @@ static LLVMValueRef codegen_func_def(Node *n) {
     return func;
 }
 
-/* ─── главный диспетчер ────────────────────────────────────────── */
-
 static LLVMValueRef codegen_node(Node *n) {
     if (!n) return NULL;
 
-    /* нужна текущая функция для if/while */
     LLVMBasicBlockRef cur   = LLVMGetInsertBlock(builder);
     LLVMValueRef      func  = cur ? LLVMGetBasicBlockParent(cur) : NULL;
 
@@ -422,31 +374,27 @@ static LLVMValueRef codegen_node(Node *n) {
         case NODE_SCOPE:    return codegen_scope(n);
         case NODE_IF:       return codegen_if(n, func);
         case NODE_WHILE:    return codegen_while(n, func);
-        case NODE_ELSE:     return codegen_scope(n);  /* тело else = scope */
+        case NODE_ELSE:     return codegen_scope(n);
         case NODE_UNDEF:    return NULL;
         default:            return NULL;
     }
 }
 
-/* ─── Точка входа ──────────────────────────────────────────────── */
 
 void codegen(vector_node *nodes, const char *out_file) {
     ctx     = LLVMContextCreate();
     mod     = LLVMModuleCreateWithNameInContext("flame", ctx);
     builder = LLVMCreateBuilderInContext(ctx);
 
-    /* обходим все top-level узлы */
     for (unsigned long long j = 0; j < nodes->size; j++)
         codegen_node(&nodes->data[j]);
 
-    /* верификация */
     char *err_msg = NULL;
     if (LLVMVerifyModule(mod, LLVMPrintMessageAction, &err_msg)) {
         fprintf(stderr, "codegen: module verification failed\n");
         LLVMDisposeMessage(err_msg);
     }
 
-    /* запись в .bc файл */
     if (LLVMWriteBitcodeToFile(mod, out_file) != 0)
         fprintf(stderr, "codegen: failed to write '%s'\n", out_file);
     else

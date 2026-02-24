@@ -18,7 +18,7 @@ int vt_push_back(vector_token *v, Token t) {
     if (v->size == v->capacity) {
         unsigned long long new_cap = v->capacity * 2;
         Token *temp = realloc(v->data, new_cap * sizeof(Token));
-        if (temp == NULL) return 1;  /* старый v->data не тронут */
+        if (temp == NULL) return 1;
         v->data     = temp;
         v->capacity = new_cap;
     }
@@ -26,8 +26,6 @@ int vt_push_back(vector_token *v, Token t) {
     return 0;
 }
 
-/* возвращает 0 и кладёт токен в *out
-   возвращает 1 если вектор пуст       */
 int vt_pop_back(vector_token *v, Token *out) {
     if (v->size == 0) return 1;
     v->size--;

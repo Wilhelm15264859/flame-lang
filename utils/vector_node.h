@@ -10,10 +10,9 @@ typedef struct vector_node {
     unsigned long long capacity;
 } vector_node;
 
-/* возвращают 0 при успехе, 1 при ошибке выделения памяти */
 int  vn_init      (vector_node *v, unsigned long long init_capac);
 void vn_free      (vector_node *v);
 int  vn_push_back (vector_node *v, Node t);
-int  vn_pop_back  (vector_node *v, Node *out);  /* кладёт результат в out */
+int  vn_pop_back  (vector_node *v, Node *out);
 
-#endif /* VECTOR_TOKEN_H */
+#endif

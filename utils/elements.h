@@ -34,18 +34,18 @@ typedef struct Node {
 } Node;
 
 typedef enum {
-    TOK_INT,        /* целое число          */
-    TOK_FLOAT,      /* вещественное число   */
-    TOK_STRING,     /* строка "..."         */
-    TOK_IDENT,      /* идентификатор        */
-    TOK_KEYWORD,    /* ключевое слово       */
-    TOK_OP,         /* оператор             */
-    TOK_PAREN,      /* скобки () [] {}      */
-    TOK_SEMICOLON,  /* ;                    */
-    TOK_COMMA,      /* ,                    */
-    TOK_EOF,        /* конец файла          */
-    TOK_ERROR,      /* неизвестный символ   */
-    TOK_TYPE        /* тип                  */
+    TOK_INT,
+    TOK_FLOAT,
+    TOK_STRING,
+    TOK_IDENT,
+    TOK_KEYWORD,
+    TOK_OP,
+    TOK_PAREN,
+    TOK_SEMICOLON,
+    TOK_COMMA,
+    TOK_EOF,
+    TOK_ERROR,
+    TOK_TYPE
 } TokenType;
 
 typedef struct {

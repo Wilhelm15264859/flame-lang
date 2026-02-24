@@ -9,7 +9,6 @@ const char *TWO_CHAR_OPSfl[] = {
     };
 const char SINGLE_OPSfl[] = "+-*/%=<>!&|^~?:.#";
 
-/* ─── Ключевые слова ───────────────────────────────────────────── */
 const char *KEYWORDSfl[] = {
     "var", "func",
     ((void*)0)
@@ -48,7 +47,6 @@ static const char *token_type_name(TokenType t) {
     }
 }
 
-/* ─── Лексер ───────────────────────────────────────────────────── */
 typedef struct {
     const char *src;
     int         pos;
@@ -74,21 +72,17 @@ static char advance(Lexer *lex) {
     return c;
 }
 
-/* пропустить пробелы и комментарии */
 static void skip_whitespace_comments(Lexer *lex) {
     while (1) {
-        /* пробелы */
         while (isspace(peek(lex))) advance(lex);
 
-        /* однострочный комментарий // */
         if (peek(lex) == '/' && lex->src[lex->pos + 1] == '/') {
             while (peek(lex) && peek(lex) != '\n') advance(lex);
             continue;
         }
 
-        /* многострочный комментарий /* */
         if (peek(lex) == '/' && lex->src[lex->pos + 1] == '*') {
-            advance(lex); advance(lex); /* съедаем /* */
+            advance(lex); advance(lex);
             while (peek(lex)) {
                 if (peek(lex) == '*' && lex->src[lex->pos + 1] == '/') {
                     advance(lex); advance(lex);
@@ -103,7 +97,6 @@ static void skip_whitespace_comments(Lexer *lex) {
     }
 }
 
-/* прочитать следующий токен */
 static Token next_token(Lexer *lex) {
     Token tok;
     tok.value[0] = '\0';
@@ -115,19 +108,17 @@ static Token next_token(Lexer *lex) {
 
     char c = peek(lex);
 
-    /* EOF */
     if (c == '\0') {
         tok.type = TOK_EOF;
         strcpy(tok.value, "EOF");
         return tok;
     }
 
-    /* строка "..." */
     if (c == '"') {
         advance(lex);
         int i = 0;
         while (peek(lex) && peek(lex) != '"') {
-            if (peek(lex) == '\\') { /* escape-символ */
+            if (peek(lex) == '\\') {
                 tok.value[i++] = advance(lex);
             }
             tok.value[i++] = advance(lex);
@@ -139,7 +130,6 @@ static Token next_token(Lexer *lex) {
         return tok;
     }
 
-    /* число: int или float */
     if (isdigit(c) || (c == '.' && isdigit(lex->src[lex->pos + 1]))) {
         int i = 0;
         int is_float = 0;
@@ -149,7 +139,6 @@ static Token next_token(Lexer *lex) {
             tok.value[i++] = advance(lex);
             while (isdigit(peek(lex))) tok.value[i++] = advance(lex);
         }
-        /* экспонента: e+3, E-2 */
         if (peek(lex) == 'e' || peek(lex) == 'E') {
             is_float = 1;
             tok.value[i++] = advance(lex);
@@ -162,7 +151,6 @@ static Token next_token(Lexer *lex) {
         return tok;
     }
 
-    /* идентификатор или ключевое слово */
     if (isalpha(c) || c == '_') {
         int i = 0;
         while (isalnum(peek(lex)) || peek(lex) == '_')
@@ -173,7 +161,6 @@ static Token next_token(Lexer *lex) {
         return tok;
     }
 
-    /* скобки */
     if (c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}') {
         tok.value[0] = advance(lex);
         tok.value[1] = '\0';
@@ -181,7 +168,6 @@ static Token next_token(Lexer *lex) {
         return tok;
     }
 
-    /* точка с запятой */
     if (c == ';') {
         tok.value[0] = advance(lex);
         tok.value[1] = '\0';
@@ -189,7 +175,6 @@ static Token next_token(Lexer *lex) {
         return tok;
     }
 
-    /* запятая */
     if (c == ',') {
         tok.value[0] = advance(lex);
         tok.value[1] = '\0';
@@ -197,7 +182,6 @@ static Token next_token(Lexer *lex) {
         return tok;
     }
 
-    /* операторы (включая двухсимвольные: ==, !=, <=, >=, &&, ||, ++, --, ->) */
     for (int i = 0; TWO_CHAR_OPSfl[i]; i++) {
         if (c == TWO_CHAR_OPSfl[i][0] &&
             lex->src[lex->pos + 1] == TWO_CHAR_OPSfl[i][1]) {
@@ -208,7 +192,6 @@ static Token next_token(Lexer *lex) {
             return tok;
         }
     }
-    /* односимвольные операторы */
     if (strchr(SINGLE_OPSfl, c)) {
         tok.value[0] = advance(lex);
         tok.value[1] = '\0';
@@ -216,14 +199,12 @@ static Token next_token(Lexer *lex) {
         return tok;
     }
 
-    /* неизвестный символ */
     tok.value[0] = advance(lex);
     tok.value[1] = '\0';
     tok.type = TOK_ERROR;
     return tok;
 }
 
-/* ─── Главная функция (демонстрация) ──────────────────────────── */
 vector_token *lexing(char *source) {
     Lexer lex;
     lexer_init(&lex, source);
