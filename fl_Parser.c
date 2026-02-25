@@ -43,6 +43,7 @@ Node parseAssign(Token t);
 Node parseReturn(void);
 Node parsePtrAssign(void);
 Node *parseExpr(void);
+Node parseStruct(void);
 static Node *expr_or(void);
 static Node *expr_unary(void);
 
@@ -151,13 +152,13 @@ Node parseAssign(Token t) {
     assign.childs = malloc(sizeof(vector_node));
     vn_init(assign.childs, 4);
     assign.str[0] = '\0';
-
-    Node *ident = make_node(NODE_IDENT, t.value);
-    vn_push_back(assign.childs, *ident);
-    free(ident);
-
+    
     if (strcmp(peek(0).value, "[") == 0) {
-        advance();
+        Node *ident = make_node(NODE_IDENT, t.value);
+        vn_push_back(assign.childs, *ident);
+        free(ident);
+        
+        advance(); // [
         Node *idx = parseExpr();
         if (idx) {
             vn_push_back(assign.childs, *idx);
@@ -167,13 +168,50 @@ Node parseAssign(Token t) {
             advance();
         else
             printf("Error: expected ']'\n");
-
+        
         assign.type = NODE_INDEX_ASSIGN;
-    } else {
+    } 
+    else if (peek(0).type == TOK_OP && 
+            (strcmp(peek(0).value, ".") == 0 || strcmp(peek(0).value, "->") == 0)) {
+        Node *var = make_node(NODE_VAR, t.value);
+        
+        while (peek(0).type == TOK_OP && 
+               (strcmp(peek(0).value, ".") == 0 || strcmp(peek(0).value, "->") == 0)) {
+            Token op = advance();
+            Token field = peek(0);
+            if (field.type != TOK_IDENT) {
+                printf("Error: expected field name\n");
+                break;
+            }
+            advance();
+            
+            Node *member = make_node(
+                strcmp(op.value, ".") == 0 ? NODE_MEMBER_DOT : NODE_MEMBER_ARROW,
+                field.value
+            );
+            vn_push_back(member->childs, *var);
+            free(var);
+            var = member;
+        }
+        
+        vn_push_back(assign.childs, *var);
+        free(var);
+        
         Node *undef = make_node(NODE_UNDEF, "");
         vn_push_back(assign.childs, *undef);
         free(undef);
-
+        
+        assign.type = NODE_MEMBER_ASSIGN;
+    }
+    else {
+        Node *ident = make_node(NODE_IDENT, t.value);
+        vn_push_back(assign.childs, *ident);
+        free(ident);
+        
+        Node *undef = make_node(NODE_UNDEF, "");
+        vn_push_back(assign.childs, *undef);
+        free(undef);
+        
         assign.type = NODE_ASSIGN;
     }
 
@@ -621,6 +659,34 @@ Node parseStruct(void) {
     return str;
 }
 
+static Node *expr_member(Node *left) {
+    Token t = peek(0);
+    
+    while (t.type == TOK_OP && (strcmp(t.value, ".") == 0 || strcmp(t.value, "->") == 0)) {
+        advance();
+        
+        Token field = peek(0);
+        if (field.type != TOK_IDENT) {
+            printf("Error: expected field name after '%s'\n", t.value);
+            return left;
+        }
+        advance();
+        
+        Node *node = make_node(
+            strcmp(t.value, ".") == 0 ? NODE_MEMBER_DOT : NODE_MEMBER_ARROW,
+            field.value
+        );
+        
+        vn_push_back(node->childs, *left);
+        free(left);
+        
+        left = node;
+        t = peek(0);
+    }
+    
+    return left;
+}
+
 static Node *expr_primary(void) {
     Token t = peek(0);
 
@@ -660,19 +726,19 @@ static Node *expr_primary(void) {
 
     if (t.type == TOK_IDENT) {
         advance();
-
+        
         if (strcmp(peek(0).value, "(") == 0) {
             Node call = parseFuncCall(t);
-            Node *n   = malloc(sizeof(Node));
+            Node *n = malloc(sizeof(Node));
             *n = call;
             return n;
         }
-
+        
         if (strcmp(peek(0).value, "[") == 0) {
             advance();
-            Node *idx  = expr_or();
+            Node *idx = expr_or();
             Node *node = make_node(NODE_INDEX, "[]");
-            Node *var  = make_node(NODE_VAR, t.value);
+            Node *var = make_node(NODE_VAR, t.value);
             vn_push_back(node->childs, *var);
             vn_push_back(node->childs, *idx);
             free(var); free(idx);
@@ -682,7 +748,7 @@ static Node *expr_primary(void) {
                 printf("Error: expected ']'\n");
             return node;
         }
-
+        
         return make_node(NODE_VAR, t.value);
     }
 
@@ -713,6 +779,11 @@ static Node *expr_unary(void) {
         return node;
     }
     return expr_primary();
+}
+
+Node *parseExpr(void) {
+    Node *expr = expr_or();
+    return expr_member(expr);
 }
 
 static Node *expr_term(void) {
@@ -814,8 +885,4 @@ static Node *expr_or(void) {
         left = node;
     }
     return left;
-}
-
-Node *parseExpr(void) {
-    return expr_or();
 }

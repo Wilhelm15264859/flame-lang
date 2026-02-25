@@ -34,7 +34,10 @@ typedef enum {
     NODE_ADDR,
     NODE_DEREF,
     NODE_STRING,
-    NODE_STRUCT_DEF
+    NODE_STRUCT_DEF,
+    NODE_MEMBER_DOT,
+    NODE_MEMBER_ARROW,
+    NODE_MEMBER_ASSIGN,
 } NodeType;
 
 typedef struct Node {
