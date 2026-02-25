@@ -259,11 +259,11 @@ static LLVMValueRef codegen_func_call(Node *n) {
 static LLVMValueRef codegen_if(Node *n, LLVMValueRef func) {
     if (n->childs->size < 2) return NULL;
 
-    LLVMValueRef cond = codegen_node(&n->childs->data[0]);
+    LLVMValueRef cond    = codegen_node(&n->childs->data[0]);
     if (!cond) return NULL;
 
-    LLVMValueRef zero     = LLVMConstInt(LLVMTypeOf(cond), 0, 0);
-    LLVMValueRef cond_i1  = LLVMBuildICmp(builder, LLVMIntNE, cond, zero, "ifcond");
+    LLVMValueRef zero    = LLVMConstInt(LLVMTypeOf(cond), 0, 0);
+    LLVMValueRef cond_i1 = LLVMBuildICmp(builder, LLVMIntNE, cond, zero, "ifcond");
 
     LLVMBasicBlockRef then_bb  = LLVMAppendBasicBlockInContext(ctx, func, "then");
     LLVMBasicBlockRef else_bb  = LLVMAppendBasicBlockInContext(ctx, func, "else");
@@ -275,12 +275,17 @@ static LLVMValueRef codegen_if(Node *n, LLVMValueRef func) {
     int cp = sym_checkpoint();
     codegen_node(&n->childs->data[1]);
     sym_restore(cp);
-    LLVMBuildBr(builder, merge_bb);
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder)))
+        LLVMBuildBr(builder, merge_bb);
 
     LLVMPositionBuilderAtEnd(builder, else_bb);
-    if (n->childs->size >= 3)
+    if (n->childs->size >= 3) {
+        cp = sym_checkpoint();
         codegen_node(&n->childs->data[2]);
-    LLVMBuildBr(builder, merge_bb);
+        sym_restore(cp);
+    }
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder)))
+        LLVMBuildBr(builder, merge_bb);
 
     LLVMPositionBuilderAtEnd(builder, merge_bb);
     return NULL;
@@ -305,7 +310,9 @@ static LLVMValueRef codegen_while(Node *n, LLVMValueRef func) {
     int cp = sym_checkpoint();
     codegen_node(&n->childs->data[1]);
     sym_restore(cp);
-    LLVMBuildBr(builder, cond_bb);
+
+    if (!LLVMGetBasicBlockTerminator(LLVMGetInsertBlock(builder)))
+        LLVMBuildBr(builder, cond_bb);
 
     LLVMPositionBuilderAtEnd(builder, end_bb);
     return NULL;
