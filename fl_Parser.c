@@ -56,6 +56,21 @@ Node parsing(void) {
         return parseWhile();
     else if (current.type == TOK_IDENT)
         return parseFuncCall(current);
+    else if (strcmp(current.value, "return") == 0)
+        return parseReturn();
+    else if (current.type == TOK_IDENT) {
+    if (strcmp(peek(0).value, "(") == 0)
+        return parseFuncCall(current);
+        else if (strcmp(peek(0).value, "=") == 0 ||
+                strcmp(peek(0).value, "[") == 0)
+            return parseAssign(current);
+        else {
+            printf("Error: unexpected identifier '%s'\n", peek(0).value);
+            Node error;
+            error.type = NODE_ERROR;
+            return error;
+        }
+    }
     else if (current.type == TOK_EOF) {
         Node eof;
         eof.type  = NODE_EOF;
@@ -86,6 +101,80 @@ vector_node *parse(int it, vector_token* tokenss) {
     }
 
     return nodes;
+}
+
+Node parseAssign(Token t) {
+    Node assign;
+    assign.childs = malloc(sizeof(vector_node));
+    vn_init(assign.childs, 4);
+    assign.str[0] = '\0';
+
+    Node *ident = make_node(NODE_IDENT, t.value);
+    vn_push_back(assign.childs, *ident);
+    free(ident);
+
+    if (strcmp(peek(0).value, "[") == 0) {
+        advance();
+        Node *idx = parseExpr();
+        if (idx) {
+            vn_push_back(assign.childs, *idx);
+            free(idx);
+        }
+        if (strcmp(peek(0).value, "]") == 0)
+            advance();
+        else
+            err("Error: expected ']'\n", 20);
+
+        assign.type = NODE_INDEX_ASSIGN;
+    } else {
+        Node *undef = make_node(NODE_UNDEF, "");
+        vn_push_back(assign.childs, *undef);
+        free(undef);
+
+        assign.type = NODE_ASSIGN;
+    }
+
+    if (strcmp(peek(0).value, "=") == 0)
+        advance();
+    else
+        err("Error: expected '='\n", 20);
+
+    Node *expr = parseExpr();
+    if (expr) {
+        vn_push_back(assign.childs, *expr);
+        free(expr);
+    }
+
+    if (peek(0).type == TOK_SEMICOLON) advance();
+
+    return assign;
+}
+
+Node parseReturn(void) {
+    Node ret;
+    ret.childs = malloc(sizeof(vector_node));
+    vn_init(ret.childs, 2);
+    ret.str[0] = '\0';
+
+    if (peek(0).type == TOK_SEMICOLON) {
+        advance();
+        Node *undef = make_node(NODE_UNDEF, "");
+        vn_push_back(ret.childs, *undef);
+        free(undef);
+    } else {
+        Node *expr = parseExpr();
+        if (expr) {
+            vn_push_back(ret.childs, *expr);
+            free(expr);
+        }
+        if (peek(0).type == TOK_SEMICOLON)
+            advance();
+        else
+            err("Error: expected ';' after return value\n", 41);
+    }
+
+    ret.type = NODE_RETURN;
+    return ret;
 }
 
 Node parseFuncCall(Token t) {
@@ -369,6 +458,7 @@ Node parseVarDef(void) {
     Node var;
     var.childs = malloc(sizeof(vector_node));
     vn_init(var.childs, 4);
+    var.str[0] = '\0';
 
     Token current = advance();
     if (current.type == TOK_TYPE) {
@@ -388,6 +478,33 @@ Node parseVarDef(void) {
         printf("Error: expected identifier\n");
     }
 
+    if (strcmp(peek(0).value, "[") == 0) {
+        advance();
+
+        if (peek(0).type == TOK_INT) {
+            Token size_tok = advance();
+            Node *size = make_node(NODE_ARRAY_SIZE, size_tok.value);
+            vn_push_back(var.childs, *size);
+            free(size);
+        } else {
+            printf("Error: expected array size\n");
+        }
+
+        if (strcmp(peek(0).value, "]") == 0)
+            advance();  /* съедаем ']' */
+        else
+            printf("Error: expected ']'\n");
+
+        Node *undef = make_node(NODE_UNDEF, "");
+        vn_push_back(var.childs, *undef);
+        free(undef);
+
+        if (peek(0).type == TOK_SEMICOLON) advance();
+
+        var.type = NODE_ARRAY_DEF;
+        return var;
+    }
+
     if (strcmp(peek(0).value, "=") == 0) {
         advance();
         Node *expr = parseExpr();
@@ -404,8 +521,7 @@ Node parseVarDef(void) {
     if (peek(0).type == TOK_SEMICOLON)
         advance();
 
-    var.type   = NODE_VAR_DEF;
-    var.str[0] = '\0';
+    var.type = NODE_VAR_DEF;
     return var;
 }
 

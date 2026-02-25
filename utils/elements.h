@@ -24,7 +24,12 @@ typedef enum {
     NODE_PARAM,
     NODE_ARGS,
     NODE_FUNC_CALL, 
-    NODE_EOF
+    NODE_EOF,
+    NODE_RETURN,
+    NODE_ARRAY_SIZE,
+    NODE_ARRAY_DEF,
+    NODE_INDEX_ASSIGN,
+    NODE_ASSIGN
 } NodeType;
 
 typedef struct Node {

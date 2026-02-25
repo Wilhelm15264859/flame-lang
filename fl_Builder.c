@@ -201,6 +201,26 @@ static LLVMValueRef codegen_var_def(Node *n) {
     }
 }
 
+static LLVMValueRef codegen_array_def(Node *n) {
+    if (n->childs->size < 3) return NULL;
+
+    const char  *type_str  = n->childs->data[0].str;
+    const char  *name      = n->childs->data[1].str;
+    int          size      = atoi(n->childs->data[2].str);
+    LLVMTypeRef  elem_type = llvm_type_from_str(type_str);
+    LLVMTypeRef  arr_type  = LLVMArrayType(elem_type, (unsigned)size);
+
+    LLVMValueRef ptr = LLVMBuildAlloca(builder, arr_type, name);
+
+    LLVMBuildStore(builder,
+        LLVMConstNull(arr_type),
+        ptr);
+
+    sym_push(name, ptr, elem_type, 0);
+
+    return ptr;
+}
+
 static LLVMValueRef codegen_func_call(Node *n) {
     const char *fname = n->str;
     Symbol     *s     = sym_lookup(fname);
@@ -299,6 +319,23 @@ static LLVMValueRef codegen_scope(Node *n) {
     return NULL;
 }
 
+static LLVMValueRef codegen_return(Node *n) {
+    if (n->childs->size == 0 || n->childs->data[0].type == NODE_UNDEF) {
+        LLVMBuildRetVoid(builder);
+        return NULL;
+    }
+
+    LLVMValueRef val = codegen_node(&n->childs->data[0]);
+    if (!val) {
+        fprintf(stderr, "codegen error: return expression is NULL\n");
+        LLVMBuildRetVoid(builder);
+        return NULL;
+    }
+
+    LLVMBuildRet(builder, val);
+    return NULL;
+}
+
 static LLVMValueRef codegen_func_def(Node *n) {
     if (n->childs->size < 4) return NULL;
 
@@ -355,6 +392,47 @@ static LLVMValueRef codegen_func_def(Node *n) {
     return func;
 }
 
+static LLVMValueRef codegen_assign(Node *n) {
+    if (n->childs->size < 3) return NULL;
+
+    const char *name = n->childs->data[0].str;
+    Symbol     *s    = sym_lookup(name);
+    if (!s) {
+        fprintf(stderr, "codegen error: undefined variable '%s'\n", name);
+        return NULL;
+    }
+
+    LLVMValueRef val = codegen_node(&n->childs->data[2]);
+    if (!val) return NULL;
+
+    LLVMBuildStore(builder, val, s->value);
+    return val;
+}
+
+static LLVMValueRef codegen_index_assign(Node *n) {
+    if (n->childs->size < 3) return NULL;
+
+    const char *name = n->childs->data[0].str;
+    Symbol     *s    = sym_lookup(name);
+    if (!s) {
+        fprintf(stderr, "codegen error: undefined array '%s'\n", name);
+        return NULL;
+    }
+
+    LLVMValueRef idx = codegen_node(&n->childs->data[1]);
+    LLVMValueRef val = codegen_node(&n->childs->data[2]);
+    if (!idx || !val) return NULL;
+
+    LLVMValueRef indices[] = {
+        LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
+        idx
+    };
+    LLVMTypeRef  arr_type = LLVMArrayType(s->type, 0);
+    LLVMValueRef ptr      = LLVMBuildGEP2(builder, arr_type, s->value, indices, 2, "gep");
+    LLVMBuildStore(builder, val, ptr);
+    return val;
+}
+
 static LLVMValueRef codegen_node(Node *n) {
     if (!n) return NULL;
 
@@ -362,21 +440,25 @@ static LLVMValueRef codegen_node(Node *n) {
     LLVMValueRef      func  = cur ? LLVMGetBasicBlockParent(cur) : NULL;
 
     switch (n->type) {
-        case NODE_NUMBER:   return codegen_number(n);
-        case NODE_FLOAT:    return codegen_float(n);
-        case NODE_VAR:      return codegen_var(n);
-        case NODE_BINOP:    return codegen_binop(n);
-        case NODE_UNOP:     return codegen_unop(n);
-        case NODE_INDEX:    return codegen_index(n);
-        case NODE_VAR_DEF:  return codegen_var_def(n);
-        case NODE_FUNC_DEF: return codegen_func_def(n);
-        case NODE_FUNC_CALL:return codegen_func_call(n);
-        case NODE_SCOPE:    return codegen_scope(n);
-        case NODE_IF:       return codegen_if(n, func);
-        case NODE_WHILE:    return codegen_while(n, func);
-        case NODE_ELSE:     return codegen_scope(n);
-        case NODE_UNDEF:    return NULL;
-        default:            return NULL;
+        case NODE_NUMBER:       return codegen_number(n);
+        case NODE_FLOAT:        return codegen_float(n);
+        case NODE_VAR:          return codegen_var(n);
+        case NODE_BINOP:        return codegen_binop(n);
+        case NODE_UNOP:         return codegen_unop(n);
+        case NODE_INDEX:        return codegen_index(n);
+        case NODE_VAR_DEF:      return codegen_var_def(n);
+        case NODE_FUNC_DEF:     return codegen_func_def(n);
+        case NODE_FUNC_CALL:    return codegen_func_call(n);
+        case NODE_SCOPE:        return codegen_scope(n);
+        case NODE_IF:           return codegen_if(n, func);
+        case NODE_WHILE:        return codegen_while(n, func);
+        case NODE_ELSE:         return codegen_scope(n);
+        case NODE_RETURN:       return codegen_return(n);
+        case NODE_ARRAY_DEF:    return codegen_array_def(n);
+        case NODE_ASSIGN:       return codegen_assign(n);
+        case NODE_INDEX_ASSIGN: return codegen_index_assign(n); 
+        case NODE_UNDEF:        return NULL;
+        default:                return NULL;
     }
 }
 
