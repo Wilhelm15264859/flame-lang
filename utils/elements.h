@@ -29,7 +29,10 @@ typedef enum {
     NODE_ARRAY_SIZE,
     NODE_ARRAY_DEF,
     NODE_INDEX_ASSIGN,
-    NODE_ASSIGN
+    NODE_ASSIGN,
+    NODE_PTR_ASSIGN,
+    NODE_ADDR,
+    NODE_DEREF
 } NodeType;
 
 typedef struct Node {

@@ -45,6 +45,15 @@ static LLVMModuleRef  mod;
 static LLVMBuilderRef builder;
 
 static LLVMTypeRef llvm_type_from_str(const char *s) {
+    int len = strlen(s);
+    if (len > 1 && s[len - 1] == '*') {
+        char base[64];
+        strncpy(base, s, len - 1);
+        base[len - 1] = '\0';
+        LLVMTypeRef elem = llvm_type_from_str(base);
+        return LLVMPointerTypeInContext(ctx, 0);
+    }
+
     if (strcmp(s, "int")    == 0) return LLVMInt32TypeInContext(ctx);
     if (strcmp(s, "short")  == 0) return LLVMInt16TypeInContext(ctx);
     if (strcmp(s, "long")   == 0) return LLVMInt64TypeInContext(ctx);
@@ -52,7 +61,7 @@ static LLVMTypeRef llvm_type_from_str(const char *s) {
     if (strcmp(s, "float")  == 0) return LLVMFloatTypeInContext(ctx);
     if (strcmp(s, "double") == 0) return LLVMDoubleTypeInContext(ctx);
     if (strcmp(s, "void")   == 0) return LLVMVoidTypeInContext(ctx);
-    fprintf(stderr, "codegen error: unknown type '%s', defaulting to i32\n", s);
+    fprintf(stderr, "codegen error: unknown type '%s'\n", s);
     return LLVMInt32TypeInContext(ctx);
 }
 
@@ -87,10 +96,33 @@ static LLVMValueRef codegen_binop(Node *n) {
     LLVMValueRef right = codegen_node(&n->childs->data[1]);
     if (!left || !right) return NULL;
 
-    int is_fp = type_is_float(LLVMTypeOf(left)) ||
-                type_is_float(LLVMTypeOf(right));
-
     const char *op = n->str;
+
+    int left_is_ptr  = LLVMGetTypeKind(LLVMTypeOf(left))  == LLVMPointerTypeKind;
+    int right_is_ptr = LLVMGetTypeKind(LLVMTypeOf(right)) == LLVMPointerTypeKind;
+
+    if (left_is_ptr && !right_is_ptr) {
+        if (strcmp(op, "+") == 0) {
+            return LLVMBuildGEP2(builder,
+                LLVMInt8TypeInContext(ctx),
+                left, &right, 1, "ptраdd");
+        }
+        if (strcmp(op, "-") == 0) {
+            LLVMValueRef neg = LLVMBuildNeg(builder, right, "neg");
+            return LLVMBuildGEP2(builder,
+                LLVMInt8TypeInContext(ctx),
+                left, &neg, 1, "ptrsub");
+        }
+    }
+
+    if (left_is_ptr && right_is_ptr && strcmp(op, "-") == 0) {
+        return LLVMBuildPtrDiff2(builder,
+            LLVMInt8TypeInContext(ctx),
+            left, right, "ptrdiff");
+    }
+
+    int is_fp = type_is_float(LLVMTypeOf(left)) ||
+                type_is_float(LLVMTypeOf(right));;
 
     if (strcmp(op, "+") == 0)
         return is_fp ? LLVMBuildFAdd(builder, left, right, "fadd")
@@ -106,6 +138,20 @@ static LLVMValueRef codegen_binop(Node *n) {
                      : LLVMBuildSDiv(builder, left, right, "div");
     if (strcmp(op, "%") == 0)
         return LLVMBuildSRem(builder, left, right, "rem");
+
+    if (left_is_ptr && right_is_ptr) {
+        LLVMValueRef cmp = NULL;
+        if (strcmp(op, "==") == 0)
+            cmp = LLVMBuildICmp(builder, LLVMIntEQ,  left, right, "eq");
+        else if (strcmp(op, "!=") == 0)
+            cmp = LLVMBuildICmp(builder, LLVMIntNE,  left, right, "ne");
+        else if (strcmp(op, "<") == 0)
+            cmp = LLVMBuildICmp(builder, LLVMIntULT, left, right, "lt");
+        else if (strcmp(op, ">") == 0)
+            cmp = LLVMBuildICmp(builder, LLVMIntUGT, left, right, "gt");
+        if (cmp)
+            return LLVMBuildZExt(builder, cmp, LLVMInt32TypeInContext(ctx), "bool");
+    }
 
     LLVMValueRef cmp = NULL;
     if (strcmp(op, "==") == 0)
@@ -173,6 +219,26 @@ static LLVMValueRef codegen_index(Node *n) {
     LLVMValueRef indices[] = { idx };
     LLVMValueRef ptr = LLVMBuildGEP2(builder, s->type, s->value, indices, 1, "gep");
     return LLVMBuildLoad2(builder, LLVMInt32TypeInContext(ctx), ptr, "elem");
+}
+
+static LLVMValueRef codegen_ptr_assign(Node *n) {
+    if (n->childs->size < 2) return NULL;
+
+    const char *name = n->childs->data[0].str;
+    Symbol     *s    = sym_lookup(name);
+    if (!s) {
+        fprintf(stderr, "codegen error: undefined pointer '%s'\n", name);
+        return NULL;
+    }
+
+    LLVMValueRef ptr = LLVMBuildLoad2(builder,
+        LLVMPointerTypeInContext(ctx, 0), s->value, "ptr");
+
+    LLVMValueRef val = codegen_node(&n->childs->data[1]);
+    if (!val) return NULL;
+
+    LLVMBuildStore(builder, val, ptr);
+    return val;
 }
 
 static LLVMValueRef codegen_var_def(Node *n) {
@@ -343,6 +409,24 @@ static LLVMValueRef codegen_return(Node *n) {
     return NULL;
 }
 
+static LLVMValueRef codegen_addr(Node *n) {
+    Symbol *s = sym_lookup(n->str);
+    if (!s) {
+        fprintf(stderr, "codegen error: undefined variable '%s'\n", n->str);
+        return NULL;
+    }
+    return s->value;
+}
+
+static LLVMValueRef codegen_deref(Node *n) {
+    if (n->childs->size < 1) return NULL;
+
+    LLVMValueRef ptr = codegen_node(&n->childs->data[0]);
+    if (!ptr) return NULL;
+
+    return LLVMBuildLoad2(builder, LLVMInt32TypeInContext(ctx), ptr, "deref");
+}
+
 static LLVMValueRef codegen_func_def(Node *n) {
     if (n->childs->size < 4) return NULL;
 
@@ -464,6 +548,9 @@ static LLVMValueRef codegen_node(Node *n) {
         case NODE_ARRAY_DEF:    return codegen_array_def(n);
         case NODE_ASSIGN:       return codegen_assign(n);
         case NODE_INDEX_ASSIGN: return codegen_index_assign(n); 
+        case NODE_PTR_ASSIGN:   return codegen_ptr_assign(n);
+        case NODE_ADDR:         return codegen_addr(n);
+        case NODE_DEREF:        return codegen_deref(n);
         case NODE_UNDEF:        return NULL;
         default:                return NULL;
     }
@@ -474,6 +561,19 @@ void codegen(vector_node *nodes, const char *out_file) {
     ctx     = LLVMContextCreate();
     mod     = LLVMModuleCreateWithNameInContext("flame", ctx);
     builder = LLVMCreateBuilderInContext(ctx);
+    {
+        LLVMTypeRef malloc_params[] = { LLVMInt64TypeInContext(ctx) };
+        LLVMTypeRef malloc_type = LLVMFunctionType(
+            LLVMPointerTypeInContext(ctx, 0),
+            malloc_params, 1, 0);
+        LLVMAddFunction(mod, "malloc", malloc_type);
+
+        LLVMTypeRef free_params[] = { LLVMPointerTypeInContext(ctx, 0) };
+        LLVMTypeRef free_type = LLVMFunctionType(
+            LLVMVoidTypeInContext(ctx),
+            free_params, 1, 0);
+        LLVMAddFunction(mod, "free", free_type);
+    }
 
     for (unsigned long long j = 0; j < nodes->size; j++)
         codegen_node(&nodes->data[j]);

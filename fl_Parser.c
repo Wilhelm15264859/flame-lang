@@ -32,6 +32,7 @@ Node *make_node(NodeType type, const char *str) {
 
 static Node *expr_or(void);
 
+Node parsePtrAssign(void);
 Node parseVarDef(void);
 Node parseFuncDef(void);
 Node parseParams(void);
@@ -58,6 +59,8 @@ Node parsing(void) {
         return parseFuncCall(current);
     else if (strcmp(current.value, "return") == 0)
         return parseReturn();
+    else if (current.type == TOK_OP && strcmp(current.value, "*") == 0)
+        return parsePtrAssign();
     else if (current.type == TOK_IDENT) {
     if (strcmp(peek(0).value, "(") == 0)
         return parseFuncCall(current);
@@ -84,6 +87,40 @@ Node parsing(void) {
     Node error;
     error.type = NODE_ERROR;
     return error;
+}
+
+Node parsePtrAssign(void) {
+    Node assign;
+    assign.childs = malloc(sizeof(vector_node));
+    vn_init(assign.childs, 2);
+    assign.str[0] = '\0';
+
+    Token t = advance();
+    if (t.type != TOK_IDENT) {
+        printf("Error: expected identifier after '*'\n");
+        assign.type = NODE_ERROR;
+        return assign;
+    }
+
+    Node *ident = make_node(NODE_IDENT, t.value);
+    vn_push_back(assign.childs, *ident);
+    free(ident);
+
+    if (strcmp(peek(0).value, "=") == 0)
+        advance();
+    else
+        printf("Error: expected '=' after '*%s'\n", t.value);
+
+    Node *expr = parseExpr();
+    if (expr) {
+        vn_push_back(assign.childs, *expr);
+        free(expr);
+    }
+
+    if (peek(0).type == TOK_SEMICOLON) advance();
+
+    assign.type = NODE_PTR_ASSIGN;
+    return assign;
 }
 
 vector_node *parse(int it, vector_token* tokenss) {
@@ -462,9 +499,18 @@ Node parseVarDef(void) {
 
     Token current = advance();
     if (current.type == TOK_TYPE) {
-        Node *type = make_node(NODE_TYPE, current.value);
-        vn_push_back(var.childs, *type);
-        free(type);
+        if (strcmp(peek(0).value, "*") == 0) {
+            advance();
+            char ptr_type_str[68];
+            snprintf(ptr_type_str, sizeof(ptr_type_str), "%s*", current.value);
+            Node *type = make_node(NODE_TYPE, ptr_type_str);
+            vn_push_back(var.childs, *type);
+            free(type);
+        } else {
+            Node *type = make_node(NODE_TYPE, current.value);
+            vn_push_back(var.childs, *type);
+            free(type);
+        }
     } else {
         printf("Error: unknown variable type\n");
     }
@@ -480,7 +526,6 @@ Node parseVarDef(void) {
 
     if (strcmp(peek(0).value, "[") == 0) {
         advance();
-
         if (peek(0).type == TOK_INT) {
             Token size_tok = advance();
             Node *size = make_node(NODE_ARRAY_SIZE, size_tok.value);
@@ -489,18 +534,14 @@ Node parseVarDef(void) {
         } else {
             printf("Error: expected array size\n");
         }
-
         if (strcmp(peek(0).value, "]") == 0)
-            advance();  /* съедаем ']' */
+            advance();
         else
             printf("Error: expected ']'\n");
-
         Node *undef = make_node(NODE_UNDEF, "");
         vn_push_back(var.childs, *undef);
         free(undef);
-
         if (peek(0).type == TOK_SEMICOLON) advance();
-
         var.type = NODE_ARRAY_DEF;
         return var;
     }
@@ -527,6 +568,25 @@ Node parseVarDef(void) {
 
 static Node *expr_primary(void) {
     Token t = peek(0);
+
+    if (t.type == TOK_OP && strcmp(t.value, "&") == 0) {
+        advance();
+        Token var_tok = advance();
+        if (var_tok.type != TOK_IDENT) {
+            printf("Error: expected identifier after '&'\n");
+            return NULL;
+        }
+        return make_node(NODE_ADDR, var_tok.value);
+    }
+
+    if (t.type == TOK_OP && strcmp(t.value, "*") == 0) {
+        advance();
+        Node *inner = expr_unary();
+        Node *node  = make_node(NODE_DEREF, "");
+        vn_push_back(node->childs, *inner);
+        free(inner);
+        return node;
+    }
 
     if (t.type == TOK_INT) {
         advance();
