@@ -32,7 +32,6 @@ Node *make_node(NodeType type, const char *str) {
 
 static Node *expr_or(void);
 
-Node parsePtrAssign(void);
 Node parseVarDef(void);
 Node parseFuncDef(void);
 Node parseParams(void);
@@ -40,7 +39,12 @@ Node parseIf(void);
 Node parseElse(void);
 Node parseWhile(void);
 Node parseFuncCall(Token t);
+Node parseAssign(Token t);
+Node parseReturn(void);
+Node parsePtrAssign(void);
 Node *parseExpr(void);
+static Node *expr_or(void);
+static Node *expr_unary(void);
 
 Node parsing(void) {
     Token current = advance();
@@ -160,7 +164,7 @@ Node parseAssign(Token t) {
         if (strcmp(peek(0).value, "]") == 0)
             advance();
         else
-            err("Error: expected ']'\n", 20);
+            printf("Error: expected ']'\n");
 
         assign.type = NODE_INDEX_ASSIGN;
     } else {
@@ -174,7 +178,7 @@ Node parseAssign(Token t) {
     if (strcmp(peek(0).value, "=") == 0)
         advance();
     else
-        err("Error: expected '='\n", 20);
+        printf("Error: expected '='\n");
 
     Node *expr = parseExpr();
     if (expr) {
@@ -207,7 +211,7 @@ Node parseReturn(void) {
         if (peek(0).type == TOK_SEMICOLON)
             advance();
         else
-            err("Error: expected ';' after return value\n", 41);
+            printf("Error: expected ';' after return value\n");
     }
 
     ret.type = NODE_RETURN;

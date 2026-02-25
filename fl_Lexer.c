@@ -30,7 +30,7 @@ static int is_type(const char *s) {
     return 0;
 }
 
-static const char *token_type_name(TokenType t) {
+/*static const char *token_type_name(TokenType t) {
     switch (t) {
         case TOK_INT:       return "INT";
         case TOK_FLOAT:     return "FLOAT";
@@ -45,7 +45,7 @@ static const char *token_type_name(TokenType t) {
         case TOK_TYPE:      return "TYPE";
         default:            return "ERROR";
     }
-}
+}*/
 
 typedef struct {
     const char *src;

@@ -50,7 +50,6 @@ static LLVMTypeRef llvm_type_from_str(const char *s) {
         char base[64];
         strncpy(base, s, len - 1);
         base[len - 1] = '\0';
-        LLVMTypeRef elem = llvm_type_from_str(base);
         return LLVMPointerTypeInContext(ctx, 0);
     }
 
