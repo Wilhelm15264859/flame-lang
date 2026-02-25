@@ -7,11 +7,38 @@
 #include <stdio.h>
 
 #define MAX_SYMS 256
+#define MAX_TYPES 64
+
+typedef struct {
+    char        name[64];
+    LLVMTypeRef type;
+} TypeEntry;
+
+static TypeEntry type_table[MAX_TYPES];
+static int       type_count = 0;
+
+static void type_push(const char *name, LLVMTypeRef type) {
+    if (type_count >= MAX_TYPES) {
+        fprintf(stderr, "codegen error: type table overflow\n");
+        return;
+    }
+    strncpy(type_table[type_count].name, name, 63);
+    type_table[type_count].type = type;
+    type_count++;
+}
+
+static LLVMTypeRef type_lookup(const char *name) {
+    for (int j = type_count - 1; j >= 0; j--)
+        if (strcmp(type_table[j].name, name) == 0)
+            return type_table[j].type;
+    return NULL;
+}
 
 typedef struct {
     char         name[64];
     LLVMValueRef value;
     LLVMTypeRef  type;
+    LLVMTypeRef  elem_type;
     int          is_func;
 } Symbol;
 
@@ -60,6 +87,10 @@ static LLVMTypeRef llvm_type_from_str(const char *s) {
     if (strcmp(s, "float")  == 0) return LLVMFloatTypeInContext(ctx);
     if (strcmp(s, "double") == 0) return LLVMDoubleTypeInContext(ctx);
     if (strcmp(s, "void")   == 0) return LLVMVoidTypeInContext(ctx);
+
+    LLVMTypeRef custom = type_lookup(s);
+    if (custom) return custom;
+
     fprintf(stderr, "codegen error: unknown type '%s'\n", s);
     return LLVMInt32TypeInContext(ctx);
 }
@@ -420,10 +451,17 @@ static LLVMValueRef codegen_addr(Node *n) {
 static LLVMValueRef codegen_deref(Node *n) {
     if (n->childs->size < 1) return NULL;
 
-    LLVMValueRef ptr = codegen_node(&n->childs->data[0]);
+    Node *inner = &n->childs->data[0];
+    Symbol *s = sym_lookup(inner->str);
+
+    LLVMValueRef ptr = codegen_node(inner);
     if (!ptr) return NULL;
 
-    return LLVMBuildLoad2(builder, LLVMInt32TypeInContext(ctx), ptr, "deref");
+    LLVMTypeRef load_type = (s && s->elem_type)
+        ? s->elem_type
+        : LLVMInt32TypeInContext(ctx);
+
+    return LLVMBuildLoad2(builder, load_type, ptr, "deref");
 }
 
 static LLVMValueRef codegen_func_def(Node *n) {
@@ -523,6 +561,84 @@ static LLVMValueRef codegen_index_assign(Node *n) {
     return val;
 }
 
+static LLVMValueRef codegen_struct_def(Node *n) {
+    unsigned field_count = (unsigned)n->childs->size;
+    LLVMTypeRef field_types[64];
+
+    for (unsigned j = 0; j < field_count && j < 64; j++) {
+        Node *field = &n->childs->data[j];
+        if (field->childs->size < 1) {
+            fprintf(stderr, "codegen error: struct field missing type\n");
+            return NULL;
+        }
+        field_types[j] = llvm_type_from_str(field->childs->data[0].str);
+    }
+
+    LLVMTypeRef struct_type = LLVMStructCreateNamed(ctx, n->str);
+    LLVMStructSetBody(struct_type, field_types, field_count, 0);
+
+    type_push(n->str, struct_type);
+
+    return NULL;
+}
+
+static LLVMValueRef codegen_string(Node *n) {
+    LLVMValueRef str = LLVMBuildGlobalStringPtr(builder, n->str, "str");
+    return str;
+}
+
+static LLVMValueRef codegen_var_def(Node *n) {
+    if (n->childs->size < 2) return NULL;
+
+    const char *type_str = n->childs->data[0].str;
+    const char *name     = n->childs->data[1].str;
+    LLVMTypeRef lltype   = llvm_type_from_str(type_str);
+
+    /* определяем elem_type для указателей */
+    LLVMTypeRef elem_type = lltype;
+    int len = strlen(type_str);
+    if (len > 1 && type_str[len - 1] == '*') {
+        char base[64];
+        strncpy(base, type_str, len - 1);
+        base[len - 1] = '\0';
+        elem_type = llvm_type_from_str(base);
+    }
+
+    LLVMBasicBlockRef cur_block = LLVMGetInsertBlock(builder);
+
+    if (cur_block) {
+        LLVMValueRef ptr = LLVMBuildAlloca(builder, lltype, name);
+
+        if (sym_count < MAX_SYMS) {
+            strncpy(sym_table[sym_count].name, name, 63);
+            sym_table[sym_count].value     = ptr;
+            sym_table[sym_count].type      = lltype;
+            sym_table[sym_count].elem_type = elem_type;
+            sym_table[sym_count].is_func   = 0;
+            sym_count++;
+        }
+
+        if (n->childs->size >= 3 && n->childs->data[2].type != NODE_UNDEF) {
+            LLVMValueRef init = codegen_node(&n->childs->data[2]);
+            if (init) LLVMBuildStore(builder, init, ptr);
+        }
+        return ptr;
+    } else {
+        LLVMValueRef global_var = LLVMAddGlobal(mod, lltype, name);
+        LLVMSetInitializer(global_var, LLVMConstNull(lltype));
+
+        if (sym_count < MAX_SYMS) {
+            strncpy(sym_table[sym_count].name, name, 63);
+            sym_table[sym_count].value     = global_var;
+            sym_table[sym_count].type      = lltype;
+            sym_table[sym_count].elem_type = elem_type;
+            sym_table[sym_count].is_func   = 0;
+            sym_count++;
+        }
+        return global_var;
+    }
+}
+
 static LLVMValueRef codegen_node(Node *n) {
     if (!n) return NULL;
 
@@ -550,6 +666,8 @@ static LLVMValueRef codegen_node(Node *n) {
         case NODE_PTR_ASSIGN:   return codegen_ptr_assign(n);
         case NODE_ADDR:         return codegen_addr(n);
         case NODE_DEREF:        return codegen_deref(n);
+        case NODE_STRING:       return codegen_string(n);
+        case NODE_STRUCT_DEF:   return codegen_struct_def(n);
         case NODE_UNDEF:        return NULL;
         default:                return NULL;
     }

@@ -61,6 +61,8 @@ Node parsing(void) {
         return parseWhile();
     else if (strcmp(current.value, "return") == 0)
         return parseReturn();
+    else if (strcmp(current.value, "struct") == 0)
+        return parseStruct();
     else if (current.type == TOK_IDENT)
         return parseFuncCall(current);
     else if (current.type == TOK_OP && strcmp(current.value, "*") == 0)
@@ -570,8 +572,62 @@ Node parseVarDef(void) {
     return var;
 }
 
+Node parseStruct(void) {
+    Node str;
+    str.childs = malloc(sizeof(vector_node));
+    vn_init(str.childs, 4);
+    str.str[0] = '\0';
+
+    Token name = advance();
+    if (name.type != TOK_IDENT) {
+        printf("Error: expected struct name\n");
+        str.type = NODE_ERROR;
+        return str;
+    }
+    strncpy(str.str, name.value, 63);
+
+    Token brace = advance();
+    if (strcmp(brace.value, "{") != 0) {
+        printf("Error: expected '{' after struct name\n");
+        str.type = NODE_ERROR;
+        return str;
+    }
+
+    while (strcmp(peek(0).value, "}") != 0) {
+        if (peek(0).type == TOK_EOF) {
+            printf("Error: unexpected EOF in struct body\n");
+            break;
+        }
+
+        if (strcmp(peek(0).value, "var") != 0) {
+            printf("Error: expected 'var' in struct body\n");
+            str.type = NODE_ERROR;
+            return str;
+        }
+        advance();
+
+        Node field = parseVarDef();
+        if (field.type == NODE_ERROR) {
+            printf("Error in struct field\n");
+            str.type = NODE_ERROR;
+            return str;
+        }
+        vn_push_back(str.childs, field);
+    }
+
+    advance();
+
+    str.type = NODE_STRUCT_DEF;
+    return str;
+}
+
 static Node *expr_primary(void) {
     Token t = peek(0);
+
+    if (t.type == TOK_STRING) {
+        advance();
+        return make_node(NODE_STRING, t.value);
+    }
 
     if (t.type == TOK_OP && strcmp(t.value, "&") == 0) {
         advance();

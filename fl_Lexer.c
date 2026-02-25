@@ -10,7 +10,7 @@ const char *TWO_CHAR_OPSfl[] = {
 const char SINGLE_OPSfl[] = "+-*/%=<>!&|^~?:.#";
 
 const char *KEYWORDSfl[] = {
-    "var", "func", "return",
+    "var", "func", "return", "struct",
     ((void*)0)
 };
 
