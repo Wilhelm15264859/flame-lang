@@ -59,10 +59,10 @@ Node parsing(void) {
         return parseElse();
     else if (strcmp(current.value, "while") == 0)
         return parseWhile();
-    else if (current.type == TOK_IDENT)
-        return parseFuncCall(current);
     else if (strcmp(current.value, "return") == 0)
         return parseReturn();
+    else if (current.type == TOK_IDENT)
+        return parseFuncCall(current);
     else if (current.type == TOK_OP && strcmp(current.value, "*") == 0)
         return parsePtrAssign();
     else if (current.type == TOK_IDENT) {

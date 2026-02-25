@@ -561,7 +561,7 @@ void codegen(vector_node *nodes, const char *out_file) {
     mod     = LLVMModuleCreateWithNameInContext("flame", ctx);
     builder = LLVMCreateBuilderInContext(ctx);
     {
-        LLVMTypeRef malloc_params[] = { LLVMInt64TypeInContext(ctx) };
+        LLVMTypeRef malloc_params[] = { LLVMInt32TypeInContext(ctx) };
         LLVMTypeRef malloc_type = LLVMFunctionType(
             LLVMPointerTypeInContext(ctx, 0),
             malloc_params, 1, 0);
@@ -587,6 +587,21 @@ void codegen(vector_node *nodes, const char *out_file) {
         fprintf(stderr, "codegen: failed to write '%s'\n", out_file);
     else
         fprintf(stderr, "codegen: wrote '%s'\n", out_file);
+
+    /*char *ir = LLVMPrintModuleToString(mod);
+    if (!ir) {
+        fprintf(stderr, "codegen: failed to print module\n");
+    } else {
+        FILE *f = fopen(out_file, "w");
+        if (f) {
+            fputs(ir, f);
+            fclose(f);
+            fprintf(stderr, "codegen: wrote '%s'\n", out_file);
+        } else {
+            fprintf(stderr, "codegen: failed to open '%s'\n", out_file);
+        }
+        LLVMDisposeMessage(ir);
+    } */
 
     LLVMDisposeBuilder(builder);
     LLVMDisposeModule(mod);

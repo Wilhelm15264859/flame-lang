@@ -1,0 +1,5 @@
+func int maint() {
+    var int* a = malloc(4);
+    free(a);
+    return 0;
+}
