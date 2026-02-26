@@ -609,12 +609,22 @@ Node parseParams(void) {
         param.str = NULL;
 
         Token current = advance();
-        if (current.type == TOK_TYPE) {
-            Node *type = make_node(NODE_TYPE, current.value);
-            vn_push_back(param.childs, *type);
-            free(type);
+        if (current.type == TOK_TYPE || current.type == TOK_IDENT) {
+            /* проверяем указатель */
+            if (strcmp(peek(0).value, "*") == 0) {
+                advance();
+                char ptr_type_str[68];
+                snprintf(ptr_type_str, sizeof(ptr_type_str), "%s*", current.value);
+                Node *type = make_node(NODE_TYPE, ptr_type_str);
+                vn_push_back(param.childs, *type);
+                free(type);
+            } else {
+                Node *type = make_node(NODE_TYPE, current.value);
+                vn_push_back(param.childs, *type);
+                free(type);
+            }
         } else {
-            printf("Error: expected type in param\n");
+            printf("Error: expected type in param, got '%s'\n", current.value);
         }
 
         current = advance();
@@ -623,7 +633,7 @@ Node parseParams(void) {
             vn_push_back(param.childs, *ident);
             free(ident);
         } else {
-            printf("Error: expected identifier in param\n");
+            printf("Error: expected identifier in param, got '%s'\n", current.value);
         }
 
         vn_push_back(params.childs, param);
@@ -833,12 +843,32 @@ static Node *expr_primary(void) {
 
     if (t.type == TOK_INT) {
         advance();
-        return make_node(NODE_NUMBER, t.value);
+        size_t len = strlen(t.value);
+
+        if (len > 1 && (t.value[len-1] == 's' || t.value[len-1] == 'S')) {
+            char buf[64]; strncpy(buf, t.value, len-1); buf[len-1] = '\0';
+            return make_node(NODE_I16, buf);
+        }
+        if (len > 1 && (t.value[len-1] == 'l' || t.value[len-1] == 'L')) {
+            char buf[64]; strncpy(buf, t.value, len-1); buf[len-1] = '\0';
+            return make_node(NODE_I64, buf);
+        }
+        long long val = atoll(t.value);
+        if (val > 2147483647LL || val < -2147483648LL)
+            return make_node(NODE_I64, t.value);
+        return make_node(NODE_I32, t.value);
     }
 
     if (t.type == TOK_FLOAT) {
         advance();
-        return make_node(NODE_FLOAT, t.value);
+        size_t len = strlen(t.value);
+        if (len > 0 && (t.value[len-1] == 'f' || t.value[len-1] == 'F')) {
+            char buf[64];
+            strncpy(buf, t.value, len-1);
+            buf[len-1] = '\0';
+            return make_node(NODE_FLOAT, buf);
+        }
+        return make_node(NODE_DOUBLE, t.value);
     }
 
     if (t.type == TOK_IDENT) {

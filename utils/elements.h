@@ -6,7 +6,6 @@ typedef struct vector_node vector_node;
 typedef enum {
     NODE_TYPE,
     NODE_IDENT,
-    NODE_NUMBER,
     NODE_FLOAT,
     NODE_VAR,
     NODE_INDEX,
@@ -39,7 +38,12 @@ typedef enum {
     NODE_MEMBER_ARROW,
     NODE_MEMBER_ASSIGN,
     NODE_SIZEOF,
-    NODE_ASM
+    NODE_ASM,
+    NODE_I32,
+    NODE_I64,
+    NODE_I8,
+    NODE_I16,
+    NODE_DOUBLE
 } NodeType;
 
 typedef struct Node {

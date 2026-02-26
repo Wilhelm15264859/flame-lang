@@ -1,10 +1,17 @@
-func int main() {
-    var char *msg = "Hello\n\0";
-
+func void print(char *msg, long len) {
     x86 mov rax, 1;
     x86 mov rdi, 1;
     x86 mov rsi, $msg;
-    x86 mov rdx, 6;
+    x86 mov rdx, $len;
+    x86 syscall;
+}
+
+func int main() {
+    var char *msg = "Hello\n\0";
+    x86 mov rax, 1;
+    x86 mov rdi, 1;
+    x86 mov rsi, $msg;
+    x86 mov rdx, 7l;
     x86 syscall;
 
     return 0;

@@ -157,6 +157,12 @@ static Token next_token(Lexer *lex) {
                 tok.value[i++] = advance(lex);
             while (isdigit(peek(lex))) tok.value[i++] = advance(lex);
         }
+        if (!is_float && (peek(lex) == 's' || peek(lex) == 'S' ||
+                        peek(lex) == 'l' || peek(lex) == 'L')) {
+            tok.value[i++] = advance(lex);
+        } else if (is_float && (peek(lex) == 'f' || peek(lex) == 'F')) {
+            tok.value[i++] = advance(lex);
+        }
         tok.value[i] = '\0';
         tok.type = is_float ? TOK_FLOAT : TOK_INT;
         return tok;

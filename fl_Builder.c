@@ -126,14 +126,6 @@ static int type_is_float(LLVMTypeRef t) {
 
 static LLVMValueRef codegen_node(Node *n);
 
-static LLVMValueRef codegen_number(Node *n) {
-    return LLVMConstInt(LLVMInt32TypeInContext(ctx), atoi(n->str), 1);
-}
-
-static LLVMValueRef codegen_float(Node *n) {
-    return LLVMConstReal(LLVMDoubleTypeInContext(ctx), atof(n->str));
-}
-
 static LLVMValueRef codegen_var(Node *n) {
     Symbol *s = sym_lookup(n->str);
     if (!s) {
@@ -864,6 +856,30 @@ static LLVMValueRef codegen_asm(Node *n) {
     return LLVMBuildCall2(builder, func_type, asm_func, args, operand_count, "");
 }
 
+static LLVMValueRef codegen_i32(Node *n) {
+    return LLVMConstInt(LLVMInt32TypeInContext(ctx), atoll(n->str), 1);
+}
+
+static LLVMValueRef codegen_i64(Node *n) {
+    return LLVMConstInt(LLVMInt64TypeInContext(ctx), atoll(n->str), 1);
+}
+
+static LLVMValueRef codegen_i8(Node *n) {
+    return LLVMConstInt(LLVMInt8TypeInContext(ctx), atoll(n->str), 1);
+}
+
+static LLVMValueRef codegen_i16(Node *n) {
+    return LLVMConstInt(LLVMInt16TypeInContext(ctx), atoll(n->str), 1);
+}
+
+static LLVMValueRef codegen_float(Node *n) {
+    return LLVMConstReal(LLVMFloatTypeInContext(ctx), atof(n->str));
+}
+
+static LLVMValueRef codegen_double(Node *n) {
+    return LLVMConstReal(LLVMDoubleTypeInContext(ctx), atof(n->str));
+}
+
 static LLVMValueRef codegen_node(Node *n) {
     if (!n) return NULL;
 
@@ -871,7 +887,6 @@ static LLVMValueRef codegen_node(Node *n) {
     LLVMValueRef      func  = cur ? LLVMGetBasicBlockParent(cur) : NULL;
 
     switch (n->type) {
-        case NODE_NUMBER:       return codegen_number(n);
         case NODE_FLOAT:        return codegen_float(n);
         case NODE_VAR:          return codegen_var(n);
         case NODE_BINOP:        return codegen_binop(n);
@@ -898,6 +913,11 @@ static LLVMValueRef codegen_node(Node *n) {
         case NODE_MEMBER_ASSIGN:return codegen_member_assign(n);
         case NODE_SIZEOF:       return codegen_sizeof(n);
         case NODE_ASM:          return codegen_asm(n);
+        case NODE_I32:          return codegen_i32(n);
+        case NODE_I64:          return codegen_i64(n);
+        case NODE_I8:           return codegen_i8(n);
+        case NODE_I16:          return codegen_i16(n);
+        case NODE_DOUBLE:       return codegen_double(n);
         case NODE_UNDEF:        return NULL;
         default:                return NULL;
     }
