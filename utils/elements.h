@@ -38,13 +38,14 @@ typedef enum {
     NODE_MEMBER_DOT,
     NODE_MEMBER_ARROW,
     NODE_MEMBER_ASSIGN,
-    NODE_SIZEOF
+    NODE_SIZEOF,
+    NODE_ASM
 } NodeType;
 
 typedef struct Node {
     NodeType type;
     vector_node *childs;
-    char str[64];
+    char *str;
 } Node;
 
 typedef enum {

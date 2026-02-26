@@ -2,6 +2,9 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/Analysis.h>
 #include <llvm-c/BitWriter.h>
+#include <llvm-c/Target.h>
+#include <llvm-c/TargetMachine.h>
+#include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -601,11 +604,6 @@ static LLVMValueRef codegen_struct_def(Node *n) {
     return NULL;
 }
 
-static LLVMValueRef codegen_string(Node *n) {
-    LLVMValueRef str = LLVMBuildGlobalStringPtr(builder, n->str, "str");
-    return str;
-}
-
 static LLVMValueRef codegen_var_def(Node *n) {
     if (n->childs->size < 2) return NULL;
 
@@ -717,80 +715,81 @@ static LLVMValueRef codegen_member_arrow(Node *n) {
 
 static LLVMValueRef codegen_member_assign(Node *n) {
     if (n->childs->size < 3) return NULL;
-    
+
     Node *member_expr = &n->childs->data[0];
     Node *value_expr  = &n->childs->data[2];
-    
+
     LLVMValueRef field_ptr = NULL;
-    
+
     if (member_expr->type == NODE_MEMBER_DOT) {
         if (member_expr->childs->size < 1) return NULL;
-        
-        LLVMValueRef struct_val = codegen_node(&member_expr->childs->data[0]);
-        if (!struct_val) return NULL;
-        
-        LLVMTypeRef struct_type = LLVMTypeOf(struct_val);
-        if (LLVMGetTypeKind(struct_type) != LLVMPointerTypeKind) {
-            fprintf(stderr, "codegen error: expected pointer to struct for '.='\n");
+
+        Node *var_node = &member_expr->childs->data[0];
+        Symbol *s = sym_lookup(var_node->str);
+        if (!s) {
+            fprintf(stderr, "codegen error: undefined variable '%s'\n", var_node->str);
             return NULL;
         }
-        
-        LLVMTypeRef elem_type = LLVMGetElementType(struct_type);
-        if (LLVMGetTypeKind(elem_type) != LLVMStructTypeKind) {
-            fprintf(stderr, "codegen error: expected struct type for '.='\n");
+
+        LLVMTypeRef struct_type = s->type;
+        if (LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
+            fprintf(stderr, "codegen error: '%s' is not a struct\n", var_node->str);
             return NULL;
         }
-        
-        int field_index = get_field_index(elem_type, member_expr->str);
+
+        int field_index = get_field_index(struct_type, member_expr->str);
         if (field_index < 0) return NULL;
-        
+
         LLVMValueRef indices[] = {
             LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
             LLVMConstInt(LLVMInt32TypeInContext(ctx), field_index, 0)
         };
-        
-        field_ptr = LLVMBuildGEP2(builder, elem_type, struct_val, indices, 2, "gep");
+        field_ptr = LLVMBuildGEP2(builder, struct_type, s->value, indices, 2, "gep");
     }
     else if (member_expr->type == NODE_MEMBER_ARROW) {
         if (member_expr->childs->size < 1) return NULL;
-        
-        LLVMValueRef ptr_val = codegen_node(&member_expr->childs->data[0]);
-        if (!ptr_val) return NULL;
-        
-        LLVMTypeRef ptr_type = LLVMTypeOf(ptr_val);
-        if (LLVMGetTypeKind(ptr_type) != LLVMPointerTypeKind) {
-            fprintf(stderr, "codegen error: expected pointer for '->='\n");
+
+        Node *var_node = &member_expr->childs->data[0];
+        Symbol *s = sym_lookup(var_node->str);
+        if (!s) {
+            fprintf(stderr, "codegen error: undefined variable '%s'\n", var_node->str);
             return NULL;
         }
-        
-        LLVMTypeRef struct_type = LLVMGetElementType(ptr_type);
-        if (LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
-            fprintf(stderr, "codegen error: expected pointer to struct for '->='\n");
+
+        LLVMTypeRef struct_type = s->elem_type;
+        if (!struct_type || LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
+            fprintf(stderr, "codegen error: '%s' is not a pointer to struct\n", var_node->str);
             return NULL;
         }
-        
+
+        LLVMValueRef ptr_val = LLVMBuildLoad2(builder,
+            LLVMPointerTypeInContext(ctx, 0), s->value, "ptr");
+
         int field_index = get_field_index(struct_type, member_expr->str);
         if (field_index < 0) return NULL;
-        
+
         LLVMValueRef indices[] = {
             LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
             LLVMConstInt(LLVMInt32TypeInContext(ctx), field_index, 0)
         };
-        
         field_ptr = LLVMBuildGEP2(builder, struct_type, ptr_val, indices, 2, "gep");
     }
     else {
         fprintf(stderr, "codegen error: expected member expression in assignment\n");
         return NULL;
     }
-    
+
     if (!field_ptr) return NULL;
-    
+
     LLVMValueRef val = codegen_node(value_expr);
     if (!val) return NULL;
-    
+
     LLVMBuildStore(builder, val, field_ptr);
     return val;
+}
+
+static LLVMValueRef codegen_string(Node *n) {
+    return LLVMBuildGlobalStringPtr(builder, n->str, "str");
 }
 
 static int get_field_index(LLVMTypeRef struct_type, const char *field_name) {
@@ -817,6 +816,52 @@ static LLVMValueRef codegen_sizeof(Node *n) {
         return NULL;
     }
     return LLVMSizeOf(t);
+}
+
+static LLVMValueRef codegen_asm(Node *n) {
+    const char *instr = n->str;
+    unsigned operand_count = (unsigned)n->childs->size - 1;
+
+    LLVMTypeRef  param_types[64];
+    LLVMValueRef args[64];
+    char         constraints[256] = "";
+
+    for (unsigned j = 0; j < operand_count && j < 64; j++) {
+        Node   *op = &n->childs->data[j + 1];
+        Symbol *s  = sym_lookup(op->str);
+        if (!s) {
+            fprintf(stderr, "codegen error: undefined variable '%s' in asm\n", op->str);
+            return NULL;
+        }
+
+        LLVMValueRef val = LLVMBuildLoad2(builder, s->type, s->value, op->str);
+        param_types[j]   = s->type;
+        args[j]          = val;
+
+        if (j > 0)
+            strncat(constraints, ",", sizeof(constraints) - strlen(constraints) - 1);
+        strncat(constraints, "r", sizeof(constraints) - strlen(constraints) - 1);
+    }
+
+    if (operand_count > 0)
+        strncat(constraints, ",", sizeof(constraints) - strlen(constraints) - 1);
+    strncat(constraints,
+        "~{rax},~{rbx},~{rcx},~{rdx},~{rsi},~{rdi},~{memory}",
+        sizeof(constraints) - strlen(constraints) - 1);
+
+    LLVMTypeRef func_type = LLVMFunctionType(
+        LLVMVoidTypeInContext(ctx),
+        param_types, operand_count, 0);
+
+    LLVMValueRef asm_func = LLVMGetInlineAsm(
+        func_type,
+        (char *)instr, strlen(instr),
+        constraints, strlen(constraints),
+        1, 1,
+        LLVMInlineAsmDialectIntel,
+        0);
+
+    return LLVMBuildCall2(builder, func_type, asm_func, args, operand_count, "");
 }
 
 static LLVMValueRef codegen_node(Node *n) {
@@ -852,6 +897,7 @@ static LLVMValueRef codegen_node(Node *n) {
         case NODE_MEMBER_ARROW: return codegen_member_arrow(n);
         case NODE_MEMBER_ASSIGN:return codegen_member_assign(n);
         case NODE_SIZEOF:       return codegen_sizeof(n);
+        case NODE_ASM:          return codegen_asm(n);
         case NODE_UNDEF:        return NULL;
         default:                return NULL;
     }
@@ -859,9 +905,47 @@ static LLVMValueRef codegen_node(Node *n) {
 
 
 void codegen(vector_node *nodes, const char *out_file) {
+    sym_count = 0;
+    type_count = 0;
+    struct_info_count = 0;
+    memset(sym_table, 0, sizeof(sym_table));
+    memset(type_table, 0, sizeof(type_table));
+    memset(struct_info, 0, sizeof(struct_info));
+
     ctx     = LLVMContextCreate();
     mod     = LLVMModuleCreateWithNameInContext("flame", ctx);
     builder = LLVMCreateBuilderInContext(ctx);
+
+    LLVMInitializeX86TargetInfo();
+    LLVMInitializeX86Target();
+    LLVMInitializeX86TargetMC();
+    LLVMInitializeX86AsmPrinter();
+
+    char *triple = LLVMGetDefaultTargetTriple();
+    LLVMSetTarget(mod, triple);
+
+    LLVMTargetRef target;
+    char *err_target = NULL;
+    LLVMGetTargetFromTriple(triple, &target, &err_target);
+    if (err_target) {
+        fprintf(stderr, "codegen: target error: %s\n", err_target);
+        LLVMDisposeMessage(err_target);
+    }
+
+    LLVMTargetMachineRef machine = LLVMCreateTargetMachine(
+        target,
+        triple,
+        "generic",
+        "",
+        LLVMCodeGenLevelDefault,
+        LLVMRelocPIC,
+        LLVMCodeModelDefault
+    );
+
+    LLVMTargetDataRef data_layout = LLVMCreateTargetDataLayout(machine);
+    LLVMSetModuleDataLayout(mod, data_layout);
+    LLVMDisposeMessage(triple);
+
     {
         LLVMTypeRef malloc_params[] = { LLVMInt32TypeInContext(ctx) };
         LLVMTypeRef malloc_type = LLVMFunctionType(
@@ -885,12 +969,7 @@ void codegen(vector_node *nodes, const char *out_file) {
         LLVMDisposeMessage(err_msg);
     }
 
-    if (LLVMWriteBitcodeToFile(mod, out_file) != 0)
-        fprintf(stderr, "codegen: failed to write '%s'\n", out_file);
-    else
-        fprintf(stderr, "codegen: wrote '%s'\n", out_file);
-
-    /*char *ir = LLVMPrintModuleToString(mod);
+    char *ir = LLVMPrintModuleToString(mod);
     if (!ir) {
         fprintf(stderr, "codegen: failed to print module\n");
     } else {
@@ -903,8 +982,10 @@ void codegen(vector_node *nodes, const char *out_file) {
             fprintf(stderr, "codegen: failed to open '%s'\n", out_file);
         }
         LLVMDisposeMessage(ir);
-    } */
+    }
 
+    LLVMDisposeTargetData(data_layout);
+    LLVMDisposeTargetMachine(machine);
     LLVMDisposeBuilder(builder);
     LLVMDisposeModule(mod);
     LLVMContextDispose(ctx);

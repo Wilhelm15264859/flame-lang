@@ -28,6 +28,7 @@ int main(int argc, char *argv[]) {
 
         FILE *file = fopen(filen, "rb");
         if (!file) {
+            perror("fopen");
             printf("Flame language\n\tCannot open file\n");
             return 1;
         }

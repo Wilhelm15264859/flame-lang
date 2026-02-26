@@ -1,5 +1,11 @@
-func int maint() {
-    var int* a = malloc(4);
-    free(a);
+func int main() {
+    var char *msg = "Hello\n\0";
+
+    x86 mov rax, 1;
+    x86 mov rdi, 1;
+    x86 mov rsi, $msg;
+    x86 mov rdx, 6;
+    x86 syscall;
+
     return 0;
 }

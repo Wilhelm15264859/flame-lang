@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdio.h>
 #include "fl_Lexer.h"
 #include "utils/vector_token.h"
 
@@ -7,10 +8,10 @@ const char *TWO_CHAR_OPSfl[] = {
         "->", "+=", "-=", "*=", "/=", "%=", "<<", ">>",
         ((void*)0)
     };
-const char SINGLE_OPSfl[] = "+-*/%=<>!&|^~?:.#";
+const char SINGLE_OPSfl[] = "+-*/%=<>!&|^~?:.#$";
 
 const char *KEYWORDSfl[] = {
-    "var", "func", "return", "struct", "sizeof",
+    "var", "func", "return", "struct", "sizeof", "x86",
     ((void*)0)
 };
 
@@ -119,9 +120,19 @@ static Token next_token(Lexer *lex) {
         int i = 0;
         while (peek(lex) && peek(lex) != '"') {
             if (peek(lex) == '\\') {
+                advance(lex);  /* съедаем \ */
+                char esc = advance(lex);
+                switch (esc) {
+                    case 'n':  tok.value[i++] = '\n'; break;
+                    case 't':  tok.value[i++] = '\t'; break;
+                    case '0':  tok.value[i++] = '\0'; break;
+                    case '\\': tok.value[i++] = '\\'; break;
+                    case '"':  tok.value[i++] = '"';  break;
+                    default:   tok.value[i++] = esc;  break;
+                }
+            } else {
                 tok.value[i++] = advance(lex);
             }
-            tok.value[i++] = advance(lex);
             if (i >= 254) break;
         }
         if (peek(lex) == '"') advance(lex);
@@ -156,8 +167,12 @@ static Token next_token(Lexer *lex) {
         while (isalnum(peek(lex)) || peek(lex) == '_')
             tok.value[i++] = advance(lex);
         tok.value[i] = '\0';
-        tok.type = is_keyword(tok.value) ? TOK_KEYWORD : TOK_IDENT;
-        tok.type = is_type(tok.value) ? TOK_TYPE : TOK_IDENT;
+        if (is_type(tok.value))
+            tok.type = TOK_TYPE;
+        else if (is_keyword(tok.value))
+            tok.type = TOK_KEYWORD;
+        else
+            tok.type = TOK_IDENT;
         return tok;
     }
 
@@ -201,6 +216,8 @@ static Token next_token(Lexer *lex) {
 
     tok.value[0] = advance(lex);
     tok.value[1] = '\0';
+    fprintf(stderr, "Lexer ERROR: unknown char '%c' (0x%02x) at line %d col %d\n",
+        c, (unsigned char)c, lex->line, lex->col);
     tok.type = TOK_ERROR;
     return tok;
 }
