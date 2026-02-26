@@ -38,6 +38,7 @@ typedef enum {
     NODE_MEMBER_DOT,
     NODE_MEMBER_ARROW,
     NODE_MEMBER_ASSIGN,
+    NODE_SIZEOF
 } NodeType;
 
 typedef struct Node {

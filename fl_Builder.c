@@ -659,70 +659,60 @@ static LLVMValueRef codegen_var_def(Node *n) {
 
 static LLVMValueRef codegen_member_dot(Node *n) {
     if (n->childs->size < 1) return NULL;
-    
-    LLVMValueRef struct_val = codegen_node(&n->childs->data[0]);
-    if (!struct_val) return NULL;
-    
-    const char *field_name = n->str;
-    
-    LLVMTypeRef struct_type = LLVMTypeOf(struct_val);
-    if (LLVMGetTypeKind(struct_type) != LLVMPointerTypeKind) {
-        fprintf(stderr, "codegen error: expected pointer to struct for '.'\n");
+
+    Node *left = &n->childs->data[0];
+    Symbol *s  = sym_lookup(left->str);
+    if (!s) {
+        fprintf(stderr, "codegen error: undefined variable '%s'\n", left->str);
         return NULL;
     }
-    
-    LLVMTypeRef elem_type = LLVMGetElementType(struct_type);
-    if (LLVMGetTypeKind(elem_type) != LLVMStructTypeKind) {
-        fprintf(stderr, "codegen error: expected struct type for '.'\n");
+
+    LLVMTypeRef struct_type = s->type;
+    if (LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
+        fprintf(stderr, "codegen error: '%s' is not a struct\n", left->str);
         return NULL;
     }
-    
-    int field_index = get_field_index(elem_type, field_name);
+
+    int field_index = get_field_index(struct_type, n->str);
     if (field_index < 0) return NULL;
-    
+
     LLVMValueRef indices[] = {
         LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
         LLVMConstInt(LLVMInt32TypeInContext(ctx), field_index, 0)
     };
-    
-    LLVMValueRef field_ptr = LLVMBuildGEP2(builder, elem_type, struct_val, indices, 2, "gep");
-    
-    LLVMTypeRef field_type = LLVMStructGetTypeAtIndex(elem_type, field_index);
-    return LLVMBuildLoad2(builder, field_type, field_ptr, field_name);
+
+    LLVMValueRef field_ptr = LLVMBuildGEP2(builder, struct_type, s->value, indices, 2, "gep");
+    LLVMTypeRef  field_type = LLVMStructGetTypeAtIndex(struct_type, field_index);
+    return LLVMBuildLoad2(builder, field_type, field_ptr, n->str);
 }
 
 static LLVMValueRef codegen_member_arrow(Node *n) {
     if (n->childs->size < 1) return NULL;
-    
-    LLVMValueRef ptr_val = codegen_node(&n->childs->data[0]);
-    if (!ptr_val) return NULL;
-    
-    const char *field_name = n->str;
-    
-    LLVMTypeRef ptr_type = LLVMTypeOf(ptr_val);
-    if (LLVMGetTypeKind(ptr_type) != LLVMPointerTypeKind) {
-        fprintf(stderr, "codegen error: expected pointer for '->'\n");
+
+    Node *left = &n->childs->data[0];
+    Symbol *s  = sym_lookup(left->str);
+    if (!s) return NULL;
+
+    LLVMValueRef ptr = LLVMBuildLoad2(builder,
+        LLVMPointerTypeInContext(ctx, 0), s->value, "ptr");
+
+    LLVMTypeRef struct_type = s->elem_type;
+    if (!struct_type || LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
+        fprintf(stderr, "codegen error: '%s' is not a pointer to struct\n", left->str);
         return NULL;
     }
-    
-    LLVMTypeRef struct_type = LLVMGetElementType(ptr_type);
-    if (LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
-        fprintf(stderr, "codegen error: expected pointer to struct for '->'\n");
-        return NULL;
-    }
-    
-    int field_index = get_field_index(struct_type, field_name);
+
+    int field_index = get_field_index(struct_type, n->str);
     if (field_index < 0) return NULL;
-    
+
     LLVMValueRef indices[] = {
         LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
         LLVMConstInt(LLVMInt32TypeInContext(ctx), field_index, 0)
     };
-    
-    LLVMValueRef field_ptr = LLVMBuildGEP2(builder, struct_type, ptr_val, indices, 2, "gep");
-    
-    LLVMTypeRef field_type = LLVMStructGetTypeAtIndex(struct_type, field_index);
-    return LLVMBuildLoad2(builder, field_type, field_ptr, field_name);
+
+    LLVMValueRef field_ptr  = LLVMBuildGEP2(builder, struct_type, ptr, indices, 2, "gep");
+    LLVMTypeRef  field_type = LLVMStructGetTypeAtIndex(struct_type, field_index);
+    return LLVMBuildLoad2(builder, field_type, field_ptr, n->str);
 }
 
 static LLVMValueRef codegen_member_assign(Node *n) {
@@ -820,6 +810,15 @@ static int get_field_index(LLVMTypeRef struct_type, const char *field_name) {
     return -1;
 }
 
+static LLVMValueRef codegen_sizeof(Node *n) {
+    LLVMTypeRef t = llvm_type_from_str(n->str);
+    if (!t) {
+        fprintf(stderr, "codegen error: unknown type '%s' in sizeof\n", n->str);
+        return NULL;
+    }
+    return LLVMSizeOf(t);
+}
+
 static LLVMValueRef codegen_node(Node *n) {
     if (!n) return NULL;
 
@@ -852,6 +851,7 @@ static LLVMValueRef codegen_node(Node *n) {
         case NODE_MEMBER_DOT:   return codegen_member_dot(n);
         case NODE_MEMBER_ARROW: return codegen_member_arrow(n);
         case NODE_MEMBER_ASSIGN:return codegen_member_assign(n);
+        case NODE_SIZEOF:       return codegen_sizeof(n);
         case NODE_UNDEF:        return NULL;
         default:                return NULL;
     }

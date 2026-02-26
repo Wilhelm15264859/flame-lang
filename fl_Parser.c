@@ -542,9 +542,10 @@ Node parseVarDef(void) {
     var.str[0] = '\0';
 
     Token current = advance();
-    if (current.type == TOK_TYPE) {
+
+    if (current.type == TOK_TYPE || current.type == TOK_IDENT) {
         if (strcmp(peek(0).value, "*") == 0) {
-            advance();
+            advance();  /* съедаем '*' */
             char ptr_type_str[68];
             snprintf(ptr_type_str, sizeof(ptr_type_str), "%s*", current.value);
             Node *type = make_node(NODE_TYPE, ptr_type_str);
@@ -556,7 +557,7 @@ Node parseVarDef(void) {
             free(type);
         }
     } else {
-        printf("Error: unknown variable type\n");
+        printf("Error: unknown variable type '%s'\n", current.value);
     }
 
     current = advance();
@@ -689,6 +690,16 @@ static Node *expr_member(Node *left) {
 
 static Node *expr_primary(void) {
     Token t = peek(0);
+
+    if (strcmp(t.value, "sizeof") == 0) {
+        advance(); 
+        Token type_tok = advance();
+        if (type_tok.type != TOK_TYPE && type_tok.type != TOK_IDENT) {
+            printf("Error: expected type after 'sizeof'\n");
+            return NULL;
+        }
+        return make_node(NODE_SIZEOF, type_tok.value);
+    }
 
     if (t.type == TOK_STRING) {
         advance();
