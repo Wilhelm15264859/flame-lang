@@ -51,6 +51,7 @@ Node parsePtrAssign(void);
 Node *parseExpr(void);
 Node parseStruct(void);
 Node parseAsm(void);
+Node parseCompoundAssign(Token t);
 static Node *expr_or(void);
 static Node *expr_unary(void);
 
@@ -75,6 +76,15 @@ Node parsing(void) {
     if (current.type == TOK_IDENT) {
         if (strcmp(peek(0).value, "(") == 0)
             return parseFuncCall(current);
+        else if (strcmp(peek(0).value, "++") == 0 ||
+                 strcmp(peek(0).value, "--") == 0)
+            return parseCompoundAssign(current);
+        else if (strcmp(peek(0).value, "+=") == 0 ||
+                 strcmp(peek(0).value, "-=") == 0 ||
+                 strcmp(peek(0).value, "*=") == 0 ||
+                 strcmp(peek(0).value, "/=") == 0 ||
+                 strcmp(peek(0).value, "%=") == 0)
+            return parseCompoundAssign(current);
         else if (strcmp(peek(0).value, "=") == 0 ||
                  strcmp(peek(0).value, "[") == 0 ||
                  strcmp(peek(0).value, ".") == 0 ||
@@ -105,6 +115,55 @@ Node parsing(void) {
     error.childs = NULL;
     error.str = NULL;
     return error;
+}
+
+Node parseCompoundAssign(Token t) {
+    Node assign;
+    assign.childs = malloc(sizeof(vector_node));
+    vn_init(assign.childs, 4);
+    assign.str = NULL;
+
+    Token op = advance();
+
+    Node *ident = make_node(NODE_IDENT, t.value);
+    vn_push_back(assign.childs, *ident);
+    free(ident);
+
+    Node *undef = make_node(NODE_UNDEF, "");
+    vn_push_back(assign.childs, *undef);
+    free(undef);
+
+    Node *var_ref = make_node(NODE_VAR, t.value);
+
+    if (strcmp(op.value, "++") == 0 || strcmp(op.value, "--") == 0) {
+        Node *one = make_node(NODE_I32, "1");
+        const char *binop = (strcmp(op.value, "++") == 0) ? "+" : "-";
+        Node *binop_node = make_node(NODE_BINOP, binop);
+        vn_push_back(binop_node->childs, *var_ref);
+        vn_push_back(binop_node->childs, *one);
+        free(var_ref); free(one);
+        vn_push_back(assign.childs, *binop_node);
+        free(binop_node);
+    } else {
+        Node *rhs = parseExpr();
+        if (!rhs) {
+            free(var_ref);
+            assign.type = NODE_ERROR;
+            return assign;
+        }
+        char binop[2] = { op.value[0], '\0' }; 
+        Node *binop_node = make_node(NODE_BINOP, binop);
+        vn_push_back(binop_node->childs, *var_ref);
+        vn_push_back(binop_node->childs, *rhs);
+        free(var_ref); free(rhs);
+        vn_push_back(assign.childs, *binop_node);
+        free(binop_node);
+    }
+
+    if (peek(0).type == TOK_SEMICOLON) advance();
+
+    assign.type = NODE_ASSIGN;
+    return assign;
 }
 
 Node parseAsm(void) {
@@ -916,7 +975,9 @@ static Node *expr_primary(void) {
 static Node *expr_unary(void) {
     Token t = peek(0);
     if (t.type == TOK_OP &&
-        (strcmp(t.value, "-") == 0 || strcmp(t.value, "!") == 0))
+        (strcmp(t.value, "-") == 0 ||
+         strcmp(t.value, "!") == 0 ||
+         strcmp(t.value, "~") == 0))
     {
         advance();
         Node *operand = expr_unary();
@@ -952,11 +1013,11 @@ static Node *expr_term(void) {
     return left;
 }
 
-static Node *expr_add(void) {
+static Node *expr_shift(void) {
     Node *left = expr_term();
     while (peek(0).type == TOK_OP &&
-           (strcmp(peek(0).value, "+") == 0 ||
-            strcmp(peek(0).value, "-") == 0))
+           (strcmp(peek(0).value, "<<") == 0 ||
+            strcmp(peek(0).value, ">>") == 0))
     {
         Token op    = advance();
         Node *right = expr_term();
@@ -969,6 +1030,22 @@ static Node *expr_add(void) {
     return left;
 }
 
+static Node *expr_add(void) {
+    Node *left = expr_shift();
+    while (peek(0).type == TOK_OP &&
+           (strcmp(peek(0).value, "+") == 0 ||
+            strcmp(peek(0).value, "-") == 0))
+    {
+        Token op    = advance();
+        Node *right = expr_shift();
+        Node *node  = make_node(NODE_BINOP, op.value);
+        vn_push_back(node->childs, *left);
+        vn_push_back(node->childs, *right);
+        free(left); free(right);
+        left = node;
+    }
+    return left;
+}
 static Node *expr_cmp(void) {
     Node *left = expr_add();
     while (peek(0).type == TOK_OP &&
@@ -1005,12 +1082,57 @@ static Node *expr_eq(void) {
     return left;
 }
 
-static Node *expr_and(void) {
+static Node *expr_bitand(void) {
     Node *left = expr_eq();
-    while (peek(0).type == TOK_OP && strcmp(peek(0).value, "&&") == 0)
+    while (peek(0).type == TOK_OP && strcmp(peek(0).value, "&") == 0)
     {
         Token op    = advance();
         Node *right = expr_eq();
+        Node *node  = make_node(NODE_BINOP, op.value);
+        vn_push_back(node->childs, *left);
+        vn_push_back(node->childs, *right);
+        free(left); free(right);
+        left = node;
+    }
+    return left;
+}
+
+static Node *expr_bitxor(void) {
+    Node *left = expr_bitand();
+    while (peek(0).type == TOK_OP && strcmp(peek(0).value, "^") == 0)
+    {
+        Token op    = advance();
+        Node *right = expr_bitand();
+        Node *node  = make_node(NODE_BINOP, op.value);
+        vn_push_back(node->childs, *left);
+        vn_push_back(node->childs, *right);
+        free(left); free(right);
+        left = node;
+    }
+    return left;
+}
+
+static Node *expr_bitor(void) {
+    Node *left = expr_bitxor();
+    while (peek(0).type == TOK_OP && strcmp(peek(0).value, "|") == 0)
+    {
+        Token op    = advance();
+        Node *right = expr_bitxor();
+        Node *node  = make_node(NODE_BINOP, op.value);
+        vn_push_back(node->childs, *left);
+        vn_push_back(node->childs, *right);
+        free(left); free(right);
+        left = node;
+    }
+    return left;
+}
+
+static Node *expr_and(void) {
+    Node *left = expr_bitor();
+    while (peek(0).type == TOK_OP && strcmp(peek(0).value, "&&") == 0)
+    {
+        Token op    = advance();
+        Node *right = expr_bitor();
         Node *node  = make_node(NODE_BINOP, op.value);
         vn_push_back(node->childs, *left);
         vn_push_back(node->childs, *right);

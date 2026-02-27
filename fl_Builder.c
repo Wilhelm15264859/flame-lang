@@ -226,6 +226,17 @@ static LLVMValueRef codegen_binop(Node *n) {
     if (cmp)
         return LLVMBuildZExt(builder, cmp, LLVMInt32TypeInContext(ctx), "bool");
 
+    if (strcmp(op, "&") == 0)
+        return LLVMBuildAnd(builder, left, right, "band");
+    if (strcmp(op, "|") == 0)
+        return LLVMBuildOr(builder, left, right, "bor");
+    if (strcmp(op, "^") == 0)
+        return LLVMBuildXor(builder, left, right, "bxor");
+    if (strcmp(op, "<<") == 0)
+        return LLVMBuildShl(builder, left, right, "shl");
+    if (strcmp(op, ">>") == 0)
+        return LLVMBuildAShr(builder, left, right, "shr");
+
     fprintf(stderr, "codegen error: unknown operator '%s'\n", op);
     return NULL;
 }
@@ -245,6 +256,8 @@ static LLVMValueRef codegen_unop(Node *n) {
         LLVMValueRef cmp  = LLVMBuildICmp(builder, LLVMIntEQ, val, zero, "not");
         return LLVMBuildZExt(builder, cmp, LLVMInt32TypeInContext(ctx), "bool");
     }
+    if (strcmp(n->str, "~") == 0)
+        return LLVMBuildNot(builder, val, "bnot");
 
     fprintf(stderr, "codegen error: unknown unary op '%s'\n", n->str);
     return NULL;
