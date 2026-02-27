@@ -1,0 +1,11 @@
+#include "test1.fl"
+
+func int main() {
+    var Cons* Console = new();
+
+    var char *msg = "Hello\n\0";
+    Console->out(msg, 7l);
+    free(Console);
+
+    return 0;
+}

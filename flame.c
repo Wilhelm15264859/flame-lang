@@ -1,8 +1,11 @@
 #include "fl_Lexer.h"
 #include "fl_Parser.h"
 #include "fl_Builder.h"
+#include "fl_Preproc.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <libgen.h>
 
 const char* version = "0.0.1-_-ALPHA";
 
@@ -16,7 +19,7 @@ int main(int argc, char *argv[]) {
         printf("Flame language\n\t--%s\n", version);
         return 0;
     }
-    
+
     if (strcmp(argv[1], "-c") == 0) {
         if (argc != 3) {
             printf("Flame language\n\tUncorrect request\n");
@@ -48,8 +51,19 @@ int main(int argc, char *argv[]) {
         buffer[length] = '\0';
         fclose(file);
 
-        vector_token *tokens = lexing(buffer);
+        char filen_copy[256];
+        strncpy(filen_copy, filen, 255);
+        char *base_dir = dirname(filen_copy);
+
+        char *processed = preprocess(buffer, base_dir);
         free(buffer);
+        if (!processed) {
+            printf("Flame language\n\tPreprocessor failed\n");
+            return 1;
+        }
+
+        vector_token *tokens = lexing(processed);
+        free(processed);
 
         vector_node *nodes = parse(0, tokens);
         free(tokens);

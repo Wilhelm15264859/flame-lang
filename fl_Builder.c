@@ -625,9 +625,7 @@ static void codegen_new(Node *n, LLVMValueRef var_ptr, LLVMTypeRef elem_type) {
         return;
     }
 
-    LLVMValueRef size_val = LLVMSizeOf(elem_type);  // используем elem_type напрямую
-    size_val = LLVMBuildTrunc(builder, size_val,
-                              LLVMInt32TypeInContext(ctx), "newsize");
+    LLVMValueRef size_val = LLVMSizeOf(elem_type);
 
     LLVMValueRef malloc_fn   = LLVMGetNamedFunction(mod, "malloc");
     LLVMTypeRef  malloc_type = LLVMGlobalGetValueType(malloc_fn);
@@ -1032,7 +1030,7 @@ void codegen(vector_node *nodes, const char *out_file) {
     LLVMDisposeMessage(triple);
 
     {
-        LLVMTypeRef malloc_params[] = { LLVMInt32TypeInContext(ctx) };
+        LLVMTypeRef malloc_params[] = { LLVMInt64TypeInContext(ctx) };
         LLVMTypeRef malloc_type = LLVMFunctionType(
             LLVMPointerTypeInContext(ctx, 0),
             malloc_params, 1, 0);
