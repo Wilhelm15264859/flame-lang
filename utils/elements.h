@@ -43,7 +43,8 @@ typedef enum {
     NODE_I64,
     NODE_I8,
     NODE_I16,
-    NODE_DOUBLE
+    NODE_DOUBLE,
+    NODE_NEW
 } NodeType;
 
 typedef struct Node {

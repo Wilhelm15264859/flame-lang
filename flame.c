@@ -54,10 +54,7 @@ int main(int argc, char *argv[]) {
         vector_node *nodes = parse(0, tokens);
         free(tokens);
 
-        char outfile[256];
-        snprintf(outfile, sizeof(outfile), "%s.fc", argv[2]);
-
-        codegen(nodes, outfile);
+        codegen(nodes, argv[2]);
         return 0;
     }
 

@@ -565,48 +565,95 @@ static LLVMValueRef codegen_index_assign(Node *n) {
 }
 
 static LLVMValueRef codegen_struct_def(Node *n) {
-    unsigned field_count = (unsigned)n->childs->size;
+    unsigned field_count = 0;
     LLVMTypeRef field_types[64];
     char field_names[64][64];
-    
-    for (unsigned j = 0; j < field_count && j < 64; j++) {
-        Node *field = &n->childs->data[j];
-        if (field->childs->size < 1) {
+
+    for (unsigned j = 0; j < (unsigned)n->childs->size && field_count < 64; j++) {
+        Node *child = &n->childs->data[j];
+        if (child->type == NODE_FUNC_DEF) continue;
+
+        if (child->childs->size < 1) {
             fprintf(stderr, "codegen error: struct field missing type\n");
             return NULL;
         }
-        
-        field_types[j] = llvm_type_from_str(field->childs->data[0].str);
-        
-        if (field->childs->size >= 2 && field->childs->data[1].type == NODE_IDENT) {
-            strncpy(field_names[j], field->childs->data[1].str, 63);
-            field_names[j][63] = '\0';
+
+        field_types[field_count] = llvm_type_from_str(child->childs->data[0].str);
+
+        if (child->childs->size >= 2 && child->childs->data[1].type == NODE_IDENT) {
+            strncpy(field_names[field_count], child->childs->data[1].str, 63);
+            field_names[field_count][63] = '\0';
         } else {
-            field_names[j][0] = '\0';
+            field_names[field_count][0] = '\0';
         }
+
+        field_count++;
     }
-    
+
     LLVMTypeRef struct_type = LLVMStructCreateNamed(ctx, n->str);
     LLVMStructSetBody(struct_type, field_types, field_count, 0);
-    
+
     type_push(n->str, struct_type);
-    
+
     if (struct_info_count < MAX_TYPES) {
         strncpy(struct_info[struct_info_count].name, n->str, 63);
-        struct_info[struct_info_count].type = struct_type;
+        struct_info[struct_info_count].type        = struct_type;
         struct_info[struct_info_count].field_count = field_count;
-        
+
         for (unsigned i = 0; i < field_count; i++) {
             strncpy(struct_info[struct_info_count].field_names[i], field_names[i], 63);
             struct_info[struct_info_count].field_types[i] = field_types[i];
         }
-        
+
         struct_info_count++;
     } else {
         fprintf(stderr, "codegen error: struct info table overflow\n");
     }
-    
+
+    for (unsigned j = 0; j < (unsigned)n->childs->size; j++) {
+        Node *child = &n->childs->data[j];
+        if (child->type == NODE_FUNC_DEF)
+            codegen_func_def(child);
+    }
+
     return NULL;
+}
+
+static void codegen_new(Node *n, LLVMValueRef var_ptr, LLVMTypeRef elem_type) {
+    if (!elem_type) {
+        fprintf(stderr, "codegen error: unknown class type in new\n");
+        return;
+    }
+
+    LLVMValueRef size_val = LLVMSizeOf(elem_type);  // используем elem_type напрямую
+    size_val = LLVMBuildTrunc(builder, size_val,
+                              LLVMInt32TypeInContext(ctx), "newsize");
+
+    LLVMValueRef malloc_fn   = LLVMGetNamedFunction(mod, "malloc");
+    LLVMTypeRef  malloc_type = LLVMGlobalGetValueType(malloc_fn);
+    LLVMValueRef ptr = LLVMBuildCall2(builder, malloc_type, malloc_fn,
+                                      &size_val, 1, "newptr");
+
+    LLVMBuildStore(builder, ptr, var_ptr);
+
+    char init_name[128];
+    snprintf(init_name, sizeof(init_name), "%s_new", n->str);
+    LLVMValueRef init_fn = LLVMGetNamedFunction(mod, init_name);
+    if (init_fn) {
+        LLVMTypeRef  init_type = LLVMGlobalGetValueType(init_fn);
+        LLVMValueRef args[65];
+        unsigned     argc = 0;
+
+        args[argc++] = ptr;
+
+        Node *args_node = &n->childs->data[1];
+        for (unsigned long long j = 0; j < args_node->childs->size && argc < 65; j++) {
+            LLVMValueRef arg = codegen_node(&args_node->childs->data[j]);
+            if (arg) args[argc++] = arg;
+        }
+
+        LLVMBuildCall2(builder, init_type, init_fn, args, argc, "");
+    }
 }
 
 static LLVMValueRef codegen_var_def(Node *n) {
@@ -640,8 +687,12 @@ static LLVMValueRef codegen_var_def(Node *n) {
         }
 
         if (n->childs->size >= 3 && n->childs->data[2].type != NODE_UNDEF) {
-            LLVMValueRef init = codegen_node(&n->childs->data[2]);
-            if (init) LLVMBuildStore(builder, init, ptr);
+            if (n->childs->data[2].type == NODE_NEW) {
+                codegen_new(&n->childs->data[2], ptr, elem_type);
+            } else {
+                LLVMValueRef init = codegen_node(&n->childs->data[2]);
+                if (init) LLVMBuildStore(builder, init, ptr);
+            }
         }
         return ptr;
     } else {
@@ -953,6 +1004,7 @@ void codegen(vector_node *nodes, const char *out_file) {
     LLVMInitializeX86Target();
     LLVMInitializeX86TargetMC();
     LLVMInitializeX86AsmPrinter();
+    LLVMInitializeX86AsmParser();
 
     char *triple = LLVMGetDefaultTargetTriple();
     LLVMSetTarget(mod, triple);
@@ -1002,19 +1054,39 @@ void codegen(vector_node *nodes, const char *out_file) {
         LLVMDisposeMessage(err_msg);
     }
 
+    char ir_file[256];
+    snprintf(ir_file, sizeof(ir_file), "%s.ll", out_file);
     char *ir = LLVMPrintModuleToString(mod);
-    if (!ir) {
-        fprintf(stderr, "codegen: failed to print module\n");
-    } else {
-        FILE *f = fopen(out_file, "w");
+    if (ir) {
+        FILE *f = fopen(ir_file, "w");
         if (f) {
             fputs(ir, f);
             fclose(f);
-            fprintf(stderr, "codegen: wrote '%s'\n", out_file);
-        } else {
-            fprintf(stderr, "codegen: failed to open '%s'\n", out_file);
+            fprintf(stderr, "codegen: wrote IR '%s'\n", ir_file);
         }
         LLVMDisposeMessage(ir);
+    }
+
+    char obj_file[256];
+    snprintf(obj_file, sizeof(obj_file), "%s.o", out_file);
+
+    char *emit_err = NULL;
+    if (LLVMTargetMachineEmitToFile(machine, mod,
+                                    obj_file,
+                                    LLVMObjectFile,
+                                    &emit_err)) {
+        fprintf(stderr, "codegen: emit error: %s\n", emit_err);
+        LLVMDisposeMessage(emit_err);
+    } else {
+        fprintf(stderr, "codegen: wrote object '%s'\n", obj_file);
+
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "gcc %s -o %s -lc -no-pie", obj_file, out_file);
+        int ret = system(cmd);
+        if (ret != 0)
+            fprintf(stderr, "codegen: linker failed (code %d)\n", ret);
+        else
+            fprintf(stderr, "codegen: linked '%s'\n", out_file);
     }
 
     LLVMDisposeTargetData(data_layout);
