@@ -23,6 +23,20 @@ static const char *var_type_lookup(const char *var) {
     return NULL;
 }
 
+static char known_classes[64][64];
+static int  known_class_count = 0;
+
+static void class_push(const char *name) {
+    if (known_class_count >= 64) return;
+    strncpy(known_classes[known_class_count++], name, 63);
+}
+
+static int class_lookup(const char *name) {
+    for (int j = 0; j < known_class_count; j++)
+        if (strcmp(known_classes[j], name) == 0) return 1;
+    return 0;
+}
+
 static Token peek(int padding) {
     if (i + padding >= 0 && (unsigned)(i + padding) < tokens->size)
         return tokens->data[i + padding];
@@ -305,6 +319,8 @@ Node parsePtrAssign(void) {
 vector_node *parse(int it, vector_token* tokenss) {
     i = it;
     tokens = tokenss;
+    var_type_count   = 0;
+    known_class_count = 0;
     
     vector_node *nodes = malloc(sizeof(vector_node));
     vn_init(nodes, 4);
@@ -927,6 +943,7 @@ Node parseClass(void) {
 
     cls.str = malloc(strlen(name.value) + 1);
     strcpy(cls.str, name.value);
+    class_push(name.value);
 
     Token brace = advance();
     if (strcmp(brace.value, "{") != 0) {
@@ -941,6 +958,12 @@ Node parseClass(void) {
             break;
         }
 
+        int is_static = 0;
+        if (peek(0).type == TOK_KEYWORD && strcmp(peek(0).value, "static") == 0) {
+            is_static = 1;
+            advance();
+        }
+
         if (peek(0).type == TOK_KEYWORD && strcmp(peek(0).value, "var") == 0) {
             advance();
             Node field = parseVarDef();
@@ -949,6 +972,8 @@ Node parseClass(void) {
                 cls.type = NODE_ERROR;
                 return cls;
             }
+            if (is_static)
+                field.type = NODE_STATIC_VAR_DEF;
             vn_push_back(cls.childs, field);
         }
         else if (peek(0).type == TOK_KEYWORD && strcmp(peek(0).value, "func") == 0) {
@@ -967,43 +992,49 @@ Node parseClass(void) {
             method_name_node->str = malloc(strlen(new_name) + 1);
             strcpy(method_name_node->str, new_name);
 
-            Node *params_node = &method.childs->data[2];
+            if (!is_static) {
+                Node *params_node = &method.childs->data[2];
 
-            Node self_param;
-            self_param.childs = malloc(sizeof(vector_node));
-            vn_init(self_param.childs, 2);
-            self_param.type = NODE_PARAM;
-            self_param.str  = NULL;
+                Node self_param;
+                self_param.childs = malloc(sizeof(vector_node));
+                vn_init(self_param.childs, 2);
+                self_param.type = NODE_PARAM;
+                self_param.str  = NULL;
 
-            char self_type[68];
-            snprintf(self_type, sizeof(self_type), "%s*", name.value);
-            Node *self_type_node = make_node(NODE_TYPE, self_type);
-            vn_push_back(self_param.childs, *self_type_node);
-            free(self_type_node);
+                char self_type[68];
+                snprintf(self_type, sizeof(self_type), "%s*", name.value);
+                Node *self_type_node = make_node(NODE_TYPE, self_type);
+                vn_push_back(self_param.childs, *self_type_node);
+                free(self_type_node);
 
-            Node *self_name_node = make_node(NODE_IDENT, "self");
-            vn_push_back(self_param.childs, *self_name_node);
-            free(self_name_node);
+                Node *self_name_node = make_node(NODE_IDENT, "self");
+                vn_push_back(self_param.childs, *self_name_node);
+                free(self_name_node);
 
-            vector_node *new_params = malloc(sizeof(vector_node));
-            vn_init(new_params, params_node->childs->size + 1);
-            vn_push_back(new_params, self_param);
-            for (unsigned long long k = 0; k < params_node->childs->size; k++)
-                vn_push_back(new_params, params_node->childs->data[k]);
-            vn_free(params_node->childs);
-            free(params_node->childs);
-            params_node->childs = new_params;
+                vector_node *new_params = malloc(sizeof(vector_node));
+                vn_init(new_params, params_node->childs->size + 1);
+                vn_push_back(new_params, self_param);
+                for (unsigned long long k = 0; k < params_node->childs->size; k++)
+                    vn_push_back(new_params, params_node->childs->data[k]);
+                vn_free(params_node->childs);
+                free(params_node->childs);
+                params_node->childs = new_params;
+
+                method.type = NODE_FUNC_DEF;
+            } else {
+                method.type = NODE_STATIC_FUNC_DEF;
+            }
 
             vn_push_back(cls.childs, method);
         }
         else {
-            printf("Error: expected 'var' or 'func' in class body, got '%s'\n", peek(0).value);
+            printf("Error: expected 'var', 'func', or 'static' in class body, got '%s'\n", peek(0).value);
             cls.type = NODE_ERROR;
             return cls;
         }
     }
 
-    advance(); // }
+    advance();
 
     cls.type = NODE_STRUCT_DEF;
     return cls;
@@ -1117,9 +1148,15 @@ static Node *expr_primary(void) {
 
             const char *cls = var_type_lookup(t.value);
             if (!cls) {
-                printf("Error: unknown type for variable '%s'\n", t.value);
-                return NULL;
+                if (class_lookup(t.value)) {
+                    cls = t.value;
+                } else {
+                    printf("Error: unknown type for variable '%s'\n", t.value);
+                    return NULL;
+                }
             }
+
+            int is_static = (var_type_lookup(t.value) == NULL && class_lookup(t.value));
 
             char full_name[128];
             snprintf(full_name, sizeof(full_name), "%s_%s", cls, mname.value);
@@ -1134,11 +1171,13 @@ static Node *expr_primary(void) {
             vector_node *new_args_childs = malloc(sizeof(vector_node));
             vn_init(new_args_childs, args_node->size + 1);
 
-            Node *self_arg = (strcmp(op.value, ".") == 0)
-                ? make_node(NODE_ADDR, t.value)
-                : make_node(NODE_VAR,  t.value);
-            vn_push_back(new_args_childs, *self_arg);
-            free(self_arg);
+            if (!is_static) {
+                Node *self_arg = (strcmp(op.value, ".") == 0)
+                    ? make_node(NODE_ADDR, t.value)
+                    : make_node(NODE_VAR,  t.value);
+                vn_push_back(new_args_childs, *self_arg);
+                free(self_arg);
+            }
 
             for (unsigned long long k = 0; k < args_node->size; k++)
                 vn_push_back(new_args_childs, args_node->data[k]);

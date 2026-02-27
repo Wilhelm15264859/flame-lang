@@ -44,7 +44,9 @@ typedef enum {
     NODE_I8,
     NODE_I16,
     NODE_DOUBLE,
-    NODE_NEW
+    NODE_NEW,
+    NODE_STATIC_VAR_DEF,
+    NODE_STATIC_FUNC_DEF,
 } NodeType;
 
 typedef struct Node {
