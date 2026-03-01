@@ -1,24 +1,20 @@
 #include "test1.fl"
 
-class A {
-    var int a = 0;
+exception DivByZero {
+    var int op;
 
-    new(char *msg) {
-        Console.out(msg, 7l);
-        self->a = 1;
+    instruction {
+        %n / %:op
     }
 
-    delete(cahr *msg) {
-        Console.out(msg, 4l)
+    replace {
+        var char *msg = "Error\n\0";
+        Console.out(msg, 7l);
     }
 }
 
 func int main() {
-    var char *msg = "Hello\n\0";
-    var char *msg2 = "No\n\0";
-
-    var A *obj = new(msg);
-    delete(msg2) obj;
+    var int a = 5 / 0;
 
     return 0;
 }

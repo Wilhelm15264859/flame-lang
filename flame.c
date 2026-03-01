@@ -1,7 +1,8 @@
+#include "fl_Preproc.h"
 #include "fl_Lexer.h"
+#include "fl_Exception.h"
 #include "fl_Parser.h"
 #include "fl_Builder.h"
-#include "fl_Preproc.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -81,8 +82,14 @@ int main(int argc, char *argv[]) {
         vector_token *tokens = lexing(processed);
         free(processed);
 
-        vector_node *nodes = parse(0, tokens);
+        vector_token *tokens_clean = extract_exceptions(tokens);
         free(tokens);
+
+        vector_token *tokens_ready = preparse(tokens_clean);
+        free(tokens_clean);
+
+        vector_node *nodes = parse(0, tokens_ready);
+        free(tokens_ready);
 
         codegen(nodes, input_file, link_flags);
         return 0;

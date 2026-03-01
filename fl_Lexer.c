@@ -12,7 +12,8 @@ const char SINGLE_OPSfl[] = "+-*/%=<>!&|^~?:.#$";
 
 const char *KEYWORDSfl[] = {
     "var", "func", "return", "struct", "sizeof", "x86", "new", "class", "static",
-    "for", "do", "if", "else", "while",  "delete",  "extern",
+    "for", "do", "if", "else", "while",  "delete",  "extern", "exception", "instruction", 
+    "check", "replace",
     ((void*)0)
 };
 
@@ -31,23 +32,6 @@ static int is_type(const char *s) {
         if (strcmp(TYPESfl[i], s) == 0) return 1;
     return 0;
 }
-
-/*static const char *token_type_name(TokenType t) {
-    switch (t) {
-        case TOK_INT:       return "INT";
-        case TOK_FLOAT:     return "FLOAT";
-        case TOK_STRING:    return "STRING";
-        case TOK_IDENT:     return "IDENT";
-        case TOK_KEYWORD:   return "KEYWORD";
-        case TOK_OP:        return "OP";
-        case TOK_PAREN:     return "PAREN";
-        case TOK_SEMICOLON: return "SEMICOLON";
-        case TOK_COMMA:     return "COMMA";
-        case TOK_EOF:       return "EOF";
-        case TOK_TYPE:      return "TYPE";
-        default:            return "ERROR";
-    }
-}*/
 
 typedef struct {
     const char *src;

@@ -94,3 +94,22 @@ libc, llvm-config, llc, gcc
   x86 mov rdx, 5l;
   x86 syscall
   ```
+
+- Exception declaration:
+
+  ```Flame
+  exception DivByZero {
+    var int op;
+
+    instruction {
+      %n / %:op
+    }
+
+    checker {
+      if (op == 0) {
+          var char *msg = "Error\n\0";
+          Console.out(msg, 7l);
+      }
+    }
+  }
+  ```
