@@ -1147,6 +1147,33 @@ static LLVMValueRef codegen_delete(Node *n) {
     return NULL;
 }
 
+static LLVMValueRef codegen_extern_func_def(Node *n) {
+    if (n->childs->size < 3) return NULL;
+
+    const char  *ret_str    = n->childs->data[0].str;
+    const char  *fname      = n->childs->data[1].str;
+    Node        *params     = &n->childs->data[2];
+    LLVMTypeRef  ret_type   = llvm_type_from_str(ret_str);
+
+    LLVMTypeRef param_types[64];
+    unsigned    param_count = 0;
+
+    if (params->type == NODE_PARAMS) {
+        for (unsigned long long j = 0; j < params->childs->size && param_count < 64; j++) {
+            Node *param = &params->childs->data[j];
+            if (param->childs->size >= 1)
+                param_types[param_count++] = llvm_type_from_str(param->childs->data[0].str);
+        }
+    }
+
+    LLVMTypeRef  func_type = LLVMFunctionType(ret_type, param_types, param_count, 0);
+    LLVMValueRef func      = LLVMAddFunction(mod, fname, func_type);
+    LLVMSetLinkage(func, LLVMExternalLinkage);
+
+    sym_push(fname, func, func_type, 1);
+    return func;
+}
+
 static LLVMValueRef codegen_node(Node *n) {
     if (!n) return NULL;
 
@@ -1190,13 +1217,14 @@ static LLVMValueRef codegen_node(Node *n) {
         case NODE_FOR:             return codegen_for(n, func);
         case NODE_DO_WHILE:        return codegen_do_while(n, func);
         case NODE_DELETE:          return codegen_delete(n);
+        case NODE_EXTERN_FUNC_DEF: return codegen_extern_func_def(n);
         case NODE_UNDEF:           return NULL;
         default:                   return NULL;
     }
 }
 
 
-void codegen(vector_node *nodes, const char *out_file) {
+void codegen(vector_node *nodes, const char *out_file, const char *extra_link_flags) {
     sym_count = 0;
     type_count = 0;
     struct_info_count = 0;
@@ -1289,7 +1317,7 @@ void codegen(vector_node *nodes, const char *out_file) {
         fprintf(stderr, "codegen: wrote object '%s'\n", obj_file);
 
         char cmd[512];
-        snprintf(cmd, sizeof(cmd), "gcc %s -o %s -lc -no-pie", obj_file, out_file);
+        snprintf(cmd, sizeof(cmd), "gcc %s -o %s -lc -no-pie %s", obj_file, out_file, extra_link_flags ? extra_link_flags : "");
         int ret = system(cmd);
         if (ret != 0)
             fprintf(stderr, "codegen: linker failed (code %d)\n", ret);

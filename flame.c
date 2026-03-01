@@ -21,13 +21,30 @@ int main(int argc, char *argv[]) {
     }
 
     if (strcmp(argv[1], "-c") == 0) {
-        if (argc != 3) {
+        if (argc < 3) {
             printf("Flame language\n\tUncorrect request\n");
             return 1;
         }
 
+        const char *input_file = argv[2];
+        char link_flags[512] = "";
+
+        // собираем -l флаги начиная с argv[3]
+        for (int i = 3; i < argc; i++) {
+            if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
+                strncat(link_flags, " -l", sizeof(link_flags) - strlen(link_flags) - 1);
+                strncat(link_flags, argv[++i], sizeof(link_flags) - strlen(link_flags) - 1);
+            } else if (strncmp(argv[i], "-l", 2) == 0) {
+                strncat(link_flags, " ", sizeof(link_flags) - strlen(link_flags) - 1);
+                strncat(link_flags, argv[i], sizeof(link_flags) - strlen(link_flags) - 1);
+            } else {
+                printf("Flame language\n\tUnknown flag '%s'\n", argv[i]);
+                return 1;
+            }
+        }
+
         char filen[256];
-        snprintf(filen, sizeof(filen), "%s.fl", argv[2]);
+        snprintf(filen, sizeof(filen), "%s.fl", input_file);
 
         FILE *file = fopen(filen, "rb");
         if (!file) {
@@ -68,7 +85,7 @@ int main(int argc, char *argv[]) {
         vector_node *nodes = parse(0, tokens);
         free(tokens);
 
-        codegen(nodes, argv[2]);
+        codegen(nodes, input_file, link_flags);
         return 0;
     }
 

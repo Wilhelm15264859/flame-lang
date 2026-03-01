@@ -50,6 +50,7 @@ typedef enum {
     NODE_FOR,
     NODE_DO_WHILE,
     NODE_DELETE,
+    NODE_EXTERN_FUNC_DEF,
 } NodeType;
 
 typedef struct Node {

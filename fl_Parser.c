@@ -95,6 +95,7 @@ Node parseClass(void);
 Node parseCompoundAssign(Token t);
 Node parseFor(void);
 Node parseDelete(void);
+Node parseExternFuncDef(void);
 Node parseDoWhile(void);
 static Node *expr_or(void);
 static Node *expr_unary(void);
@@ -115,6 +116,7 @@ Node parsing(void) {
         if (strcmp(current.value, "for")    == 0) return parseFor();
         if (strcmp(current.value, "do")     == 0) return parseDoWhile();
         if (strcmp(current.value, "delete") == 0) return parseDelete();
+        if (strcmp(current.value, "extern") == 0) return parseExternFuncDef();
     }
 
     if (current.type == TOK_OP && strcmp(current.value, "*") == 0)
@@ -179,6 +181,71 @@ Node parsing(void) {
     error.childs = NULL;
     error.str = NULL;
     return error;
+}
+
+Node parseExternFuncDef(void) {
+    Node ext;
+    ext.childs = malloc(sizeof(vector_node));
+    vn_init(ext.childs, 3);
+    ext.str = NULL;
+
+    Token t = advance();
+    if (t.type != TOK_KEYWORD || strcmp(t.value, "func") != 0) {
+        printf("Error: expected 'func' after 'extern'\n");
+        err();
+        ext.type = NODE_ERROR;
+        return ext;
+    }
+
+    t = advance();
+    if (t.type != TOK_TYPE && strcmp(t.value, "void") != 0 && t.type != TOK_IDENT) {
+        printf("Error: expected return type in extern func\n");
+        err();
+        ext.type = NODE_ERROR;
+        return ext;
+    }
+    Node *ret_type = make_node(NODE_TYPE, t.value);
+    vn_push_back(ext.childs, *ret_type);
+    free(ret_type);
+
+    t = advance();
+    if (t.type != TOK_IDENT) {
+        printf("Error: expected function name in extern func\n");
+        err();
+        ext.type = NODE_ERROR;
+        return ext;
+    }
+    Node *fname = make_node(NODE_IDENT, t.value);
+    vn_push_back(ext.childs, *fname);
+    free(fname);
+
+    t = advance();
+    if (strcmp(t.value, "(") != 0) {
+        printf("Error: expected '(' in extern func\n");
+        err();
+        ext.type = NODE_ERROR;
+        return ext;
+    }
+
+    if (strcmp(peek(0).value, ")") == 0) {
+        Node *params = make_node(NODE_PARAMS, "");
+        vn_push_back(ext.childs, *params);
+        free(params);
+    } else {
+        Node params = parseParams();
+        vn_push_back(ext.childs, params);
+    }
+
+    t = advance();
+    if (strcmp(t.value, ")") != 0) {
+        printf("Error: expected ')' in extern func\n");
+        err();
+    }
+
+    if (peek(0).type == TOK_SEMICOLON) advance();
+
+    ext.type = NODE_EXTERN_FUNC_DEF;
+    return ext;
 }
 
 Node parseDelete(void) {

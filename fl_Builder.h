@@ -1,3 +1,3 @@
 #include "utils/vector_node.h"
 
-void codegen(vector_node *nodes, const char *out_file);
+void codegen(vector_node *nodes, const char *out_file, const char *extra_link_flags);
