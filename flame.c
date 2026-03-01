@@ -2,6 +2,7 @@
 #include "fl_Lexer.h"
 #include "fl_Exception.h"
 #include "fl_Parser.h"
+#include "fl_Pregen.h"
 #include "fl_Builder.h"
 #include <stdio.h>
 #include <string.h>
@@ -91,6 +92,7 @@ int main(int argc, char *argv[]) {
         vector_node *nodes = parse(0, tokens_ready);
         free(tokens_ready);
 
+        pregen(nodes);
         codegen(nodes, input_file, link_flags);
         return 0;
     }

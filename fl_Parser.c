@@ -61,7 +61,7 @@ static void err() {
     );
 }
 
-Node *make_node(NodeType type, const char *str) {
+static Node *make_node(NodeType type, const char *str) {
     Node *n = malloc(sizeof(Node));
     n->type = type;
     n->childs = malloc(sizeof(vector_node));
@@ -1017,20 +1017,34 @@ Node parseVarDef(void) {
 
     Token current = advance();
 
+    int is_autodel = 0;
+    if (current.type == TOK_KEYWORD && strcmp(current.value, "autodel") == 0) {
+        is_autodel = 1;
+        current = advance();
+    }
+
     char base_type[64];
     base_type[0] = '\0';
 
     if (current.type == TOK_TYPE || current.type == TOK_IDENT) {
         if (strcmp(peek(0).value, "*") == 0) {
             advance();
-            char ptr_type_str[68];
-            snprintf(ptr_type_str, sizeof(ptr_type_str), "%s*", current.value);
+            char ptr_type_str[80];
+            if (is_autodel)
+                snprintf(ptr_type_str, sizeof(ptr_type_str), "autodel:%s*", current.value);
+            else
+                snprintf(ptr_type_str, sizeof(ptr_type_str), "%s*", current.value);
             Node *type = make_node(NODE_TYPE, ptr_type_str);
             vn_push_back(var.childs, *type);
             free(type);
             strncpy(base_type, current.value, 63);
         } else {
-            Node *type = make_node(NODE_TYPE, current.value);
+            char type_str[80];
+            if (is_autodel)
+                snprintf(type_str, sizeof(type_str), "autodel:%s", current.value);
+            else
+                strncpy(type_str, current.value, 79);
+            Node *type = make_node(NODE_TYPE, type_str);
             vn_push_back(var.childs, *type);
             free(type);
             strncpy(base_type, current.value, 63);
@@ -1086,13 +1100,10 @@ Node parseVarDef(void) {
 
         if (peek(0).type == TOK_KEYWORD && strcmp(peek(0).value, "new") == 0) {
             advance();
-
             Node *new_node = make_node(NODE_NEW, base_type);
-
             Node *varname_node = make_node(NODE_IDENT, var_name);
             vn_push_back(new_node->childs, *varname_node);
             free(varname_node);
-
             Node *args = make_node(NODE_ARGS, "");
             if (strcmp(peek(0).value, "(") == 0) {
                 advance();
@@ -1110,7 +1121,6 @@ Node parseVarDef(void) {
             }
             vn_push_back(new_node->childs, *args);
             free(args);
-
             vn_push_back(var.childs, *new_node);
             free(new_node);
         } else {

@@ -1,20 +1,8 @@
 #include "test1.fl"
 
-exception DivByZero {
-    var int op;
-
-    instruction {
-        %n / %:op
-    }
-
-    replace {
-        var char *msg = "Error\n\0";
-        Console.out(msg, 7l);
-    }
-}
-
 func int main() {
-    var int a = 5 / 0;
+    var autodel int *a = new();
+    a = 0;
 
     return 0;
 }

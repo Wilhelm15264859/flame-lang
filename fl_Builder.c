@@ -513,7 +513,12 @@ static LLVMValueRef codegen_func_def(Node *n) {
     if (params->type == NODE_PARAMS) {
         for (unsigned long long j = 0; j < params->childs->size && j < param_count; j++) {
             Node        *param     = &params->childs->data[j];
-            const char  *ptype_str = param->childs->data[0].str;
+            const char *ptype_str_raw = param->childs->data[0].str;
+            char ptype_str[80];
+            if (strncmp(ptype_str_raw, "autodel:", 8) == 0)
+                strncpy(ptype_str, ptype_str_raw + 8, 79);
+            else
+                strncpy(ptype_str, ptype_str_raw, 79);
             const char  *pname     = param->childs->data[1].str;
             LLVMTypeRef  ptype     = llvm_type_from_str(ptype_str);
             LLVMValueRef ptr       = LLVMBuildAlloca(builder, ptype, pname);
@@ -732,9 +737,18 @@ static void codegen_new(Node *n, LLVMValueRef var_ptr, LLVMTypeRef elem_type) {
 static LLVMValueRef codegen_var_def(Node *n) {
     if (n->childs->size < 2) return NULL;
 
-    const char *type_str = n->childs->data[0].str;
-    const char *name     = n->childs->data[1].str;
-    LLVMTypeRef lltype   = llvm_type_from_str(type_str);
+    if (n->childs->size < 2) return NULL;
+
+    const char *type_str_raw = n->childs->data[0].str;
+    const char *name         = n->childs->data[1].str;
+
+    char type_str[80];
+    if (strncmp(type_str_raw, "autodel:", 8) == 0)
+        strncpy(type_str, type_str_raw + 8, 79);
+    else
+        strncpy(type_str, type_str_raw, 79);
+
+    LLVMTypeRef lltype = llvm_type_from_str(type_str);
 
     LLVMTypeRef elem_type = lltype;
     int len = strlen(type_str);
