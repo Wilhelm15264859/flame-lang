@@ -12,6 +12,7 @@ const char SINGLE_OPSfl[] = "+-*/%=<>!&|^~?:.#$";
 
 const char *KEYWORDSfl[] = {
     "var", "func", "return", "struct", "sizeof", "x86", "new", "class", "static",
+    "for", "do", "if", "else", "while",  "delete",
     ((void*)0)
 };
 

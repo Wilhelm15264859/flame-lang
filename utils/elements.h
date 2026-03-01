@@ -47,6 +47,9 @@ typedef enum {
     NODE_NEW,
     NODE_STATIC_VAR_DEF,
     NODE_STATIC_FUNC_DEF,
+    NODE_FOR,
+    NODE_DO_WHILE,
+    NODE_DELETE,
 } NodeType;
 
 typedef struct Node {

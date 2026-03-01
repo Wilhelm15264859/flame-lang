@@ -1,8 +1,24 @@
 #include "test1.fl"
 
+class A {
+    var int a = 0;
+
+    new(char *msg) {
+        Console.out(msg, 7l);
+        self->a = 1;
+    }
+
+    delete(cahr *msg) {
+        Console.out(msg, 4l)
+    }
+}
+
 func int main() {
     var char *msg = "Hello\n\0";
-    Console->out(msg, 7l);
+    var char *msg2 = "No\n\0";
+
+    var A *obj = new(msg);
+    delete(msg2) obj;
 
     return 0;
 }
