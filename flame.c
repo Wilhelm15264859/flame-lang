@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <libgen.h>
 
-const char* version = "0.1.0-BETA";
+const char* version = "0.1.1-BETA";
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -29,7 +29,6 @@ int main(int argc, char *argv[]) {
         const char *input_file = argv[2];
         char link_flags[512] = "";
 
-        // собираем -l флаги начиная с argv[3]
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
                 strncat(link_flags, " -l", sizeof(link_flags) - strlen(link_flags) - 1);
