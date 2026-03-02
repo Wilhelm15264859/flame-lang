@@ -84,12 +84,15 @@ int main(int argc, char *argv[]) {
         free(processed);
 
         vector_token *tokens_clean = extract_exceptions(tokens);
+        vt_free(tokens);
         free(tokens);
 
         vector_token *tokens_ready = preparse(tokens_clean);
+        vt_free(tokens_clean);
         free(tokens_clean);
 
         vector_node *nodes = parse(0, tokens_ready);
+        vt_free(tokens_ready);
         free(tokens_ready);
 
         pregen(nodes);

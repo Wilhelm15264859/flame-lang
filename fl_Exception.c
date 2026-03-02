@@ -227,10 +227,13 @@ static int try_match(vector_token *tokens, int pos, Exception *ex,
     return ti - pos;
 }
 
+static int g_match_counter = 0;
+
 static void build_capture_inits(Exception *ex,
                                  char      captures[MAX_PATTERN_TOKENS][64],
                                  TokenType capture_types[MAX_PATTERN_TOKENS],
-                                 vector_token *out)
+                                 vector_token *out,
+                                 char      unique_names[MAX_PATTERN_TOKENS][64])
 {
     for (int pi = 0; pi < ex->pattern_len; pi++) {
         if (ex->pattern[pi].kind != PAT_CAPTURE) continue;
@@ -249,16 +252,40 @@ static void build_capture_inits(Exception *ex,
             }
         }
 
-        printf("DEBUG capture: var %s %s = %s (tok_type=%d)\n",
-               field_type, cap_name, cap_val, cap_type);
+        /* уникальное имя: _ex_<cap_name>_<counter>
+         * cap_name <= 48 chars, "_ex_"=4, "_"=1, counter<=10 → max 63 */
+        char cap_trunc[49];
+        strncpy(cap_trunc, cap_name, 48);
+        cap_trunc[48] = '\0';
+        snprintf(unique_names[pi], 64, "_ex_%s_%d", cap_trunc, g_match_counter);
+
+        printf("DEBUG capture: var %s %s = %s (tok_type=%d) -> %s\n",
+               field_type, cap_name, cap_val, cap_type, unique_names[pi]);
 
         Token t;
-        t.type = TOK_KEYWORD;   strncpy(t.value, "var",       63); vt_push_back(out, t);
-        t.type = TOK_TYPE;      strncpy(t.value, field_type,  63); vt_push_back(out, t);
-        t.type = TOK_IDENT;     strncpy(t.value, cap_name,    63); vt_push_back(out, t);
-        t.type = TOK_OP;        strncpy(t.value, "=",         63); vt_push_back(out, t);
-        t.type = cap_type;      strncpy(t.value, cap_val,     63); vt_push_back(out, t);
-        t.type = TOK_SEMICOLON; strncpy(t.value, ";",         63); vt_push_back(out, t);
+        t.type = TOK_KEYWORD;   strncpy(t.value, "var",              63); vt_push_back(out, t);
+        t.type = TOK_TYPE;      strncpy(t.value, field_type,         63); vt_push_back(out, t);
+        t.type = TOK_IDENT;     strncpy(t.value, unique_names[pi],   63); vt_push_back(out, t);
+        t.type = TOK_OP;        strncpy(t.value, "=",                63); vt_push_back(out, t);
+        t.type = cap_type;      strncpy(t.value, cap_val,            63); vt_push_back(out, t);
+        t.type = TOK_SEMICOLON; strncpy(t.value, ";",                63); vt_push_back(out, t);
+    }
+}
+
+/* заменяет вхождения оригинальных capture-имён на уникальные в блоке токенов */
+static void rename_captures_in_block(Token *toks, int len,
+                                      Exception *ex,
+                                      char unique_names[MAX_PATTERN_TOKENS][64])
+{
+    for (int ti = 0; ti < len; ti++) {
+        if (toks[ti].type != TOK_IDENT) continue;
+        for (int pi = 0; pi < ex->pattern_len; pi++) {
+            if (ex->pattern[pi].kind != PAT_CAPTURE) continue;
+            if (strcmp(toks[ti].value, ex->pattern[pi].value) == 0) {
+                strncpy(toks[ti].value, unique_names[pi], 63);
+                break;
+            }
+        }
     }
 }
 
@@ -271,6 +298,7 @@ vector_token *preparse(vector_token *tokens) {
         printf("  [%d] type=%d value='%s'\n", di, tokens->data[di].type, tokens->data[di].value);
 
     unsigned i = 0;
+    int stmt_start = 0;  /* индекс в result где начался текущий statement */
     while (i < tokens->size) {
         int matched = 0;
 
@@ -287,7 +315,8 @@ vector_token *preparse(vector_token *tokens) {
             if (match_len < 0) continue;
 
             matched = 1;
-            printf("DEBUG preparse: matched exception '%s' at pos %d\n", ex->name, i);
+            g_match_counter++;
+            printf("DEBUG preparse: matched exception '%s' at pos %d (match #%d)\n", ex->name, i, g_match_counter);
 
             if (ex->checker_len > 0 && ex->has_replace) {
                 printf("Error: exception '%s' has both check and replace, skipping\n", ex->name);
@@ -295,19 +324,13 @@ vector_token *preparse(vector_token *tokens) {
                 continue;
             }
 
+            /* уникальные имена capture-переменных для этого матча */
+            char unique_names[MAX_PATTERN_TOKENS][64];
+            memset(unique_names, 0, sizeof(unique_names));
+
             if (ex->has_replace) {
-                int inject_pos = (int)result->size;
-                for (int ri = (int)result->size - 1; ri >= 0; ri--) {
-                    Token *rt = &result->data[ri];
-                    if (rt->type == TOK_SEMICOLON ||
-                        strcmp(rt->value, "}") == 0 ||
-                        strcmp(rt->value, "{") == 0)
-                    {
-                        inject_pos = ri + 1;
-                        break;
-                    }
-                    if (ri == 0) { inject_pos = 0; break; }
-                }
+                /* используем stmt_start — точно начало текущего statement */
+                int inject_pos = stmt_start;
 
                 int    suffix_len = (int)result->size - inject_pos;
                 Token *suffix     = NULL;
@@ -328,16 +351,26 @@ vector_token *preparse(vector_token *tokens) {
                 strncpy(source[si2].value, ";", 63);
                 si2++;
 
-                build_capture_inits(ex, captures, capture_types, result);
+                build_capture_inits(ex, captures, capture_types, result, unique_names);
+
+                /* копируем replace-блок и переименовываем capture-переменные */
+                Token *replace_copy = malloc(sizeof(Token) * ex->replace_len);
+                memcpy(replace_copy, ex->replace, sizeof(Token) * ex->replace_len);
+                rename_captures_in_block(replace_copy, ex->replace_len, ex, unique_names);
 
                 for (int ci = 0; ci < ex->replace_len; ci++) {
-                    Token *rt = &ex->replace[ci];
+                    Token *rt = &replace_copy[ci];
 
                     if (rt->type == TOK_OP && strcmp(rt->value, "$") == 0 &&
                         ci + 1 < ex->replace_len &&
-                        strcmp(ex->replace[ci + 1].value, "source") == 0)
+                        strcmp(replace_copy[ci + 1].value, "source") == 0)
                     {
-                        for (int s2 = 0; s2 < source_len; s2++)
+                        /* если после $source в replace стоит ';', не вставляем
+                         * финальный ';' из source — иначе получится двойной ;; */
+                        int next_is_semi = (ci + 2 < ex->replace_len &&
+                            replace_copy[ci + 2].type == TOK_SEMICOLON);
+                        int emit_len = next_is_semi ? source_len - 1 : source_len;
+                        for (int s2 = 0; s2 < emit_len; s2++)
                             vt_push_back(result, source[s2]);
                         ci++;
                     } else {
@@ -345,22 +378,13 @@ vector_token *preparse(vector_token *tokens) {
                     }
                 }
 
+                free(replace_copy);
                 if (suffix) free(suffix);
                 free(source);
 
             } else {
-                int inject_pos = (int)result->size;
-                for (int ri = (int)result->size - 1; ri >= 0; ri--) {
-                    Token *rt = &result->data[ri];
-                    if (rt->type == TOK_SEMICOLON ||
-                        strcmp(rt->value, "}") == 0 ||
-                        strcmp(rt->value, "{") == 0)
-                    {
-                        inject_pos = ri + 1;
-                        break;
-                    }
-                    if (ri == 0) { inject_pos = 0; break; }
-                }
+                /* используем stmt_start — точно начало текущего statement */
+                int inject_pos = stmt_start;
 
                 int    suffix_len = (int)result->size - inject_pos;
                 Token *suffix     = NULL;
@@ -370,10 +394,16 @@ vector_token *preparse(vector_token *tokens) {
                     result->size = inject_pos;
                 }
 
-                build_capture_inits(ex, captures, capture_types, result);
+                build_capture_inits(ex, captures, capture_types, result, unique_names);
+
+                /* копируем check-блок и переименовываем capture-переменные */
+                Token *checker_copy = malloc(sizeof(Token) * ex->checker_len);
+                memcpy(checker_copy, ex->checker, sizeof(Token) * ex->checker_len);
+                rename_captures_in_block(checker_copy, ex->checker_len, ex, unique_names);
 
                 for (int ci = 0; ci < ex->checker_len; ci++)
-                    vt_push_back(result, ex->checker[ci]);
+                    vt_push_back(result, checker_copy[ci]);
+                free(checker_copy);
 
                 if (suffix_len > 0) {
                     for (int s2 = 0; s2 < suffix_len; s2++)
@@ -383,14 +413,40 @@ vector_token *preparse(vector_token *tokens) {
 
                 for (int mi = 0; mi < match_len; mi++)
                     vt_push_back(result, tokens->data[i + mi]);
+
+                /* добавляем ';' в result для check — он будет пропущен из input ниже */
+                {
+                    Token semi;
+                    semi.type = TOK_SEMICOLON;
+                    strncpy(semi.value, ";", 63);
+                    vt_push_back(result, semi);
+                }
             }
 
             i += match_len;
+
+            /* пропускаем финальный ';' оригинального statement из входного потока
+             * (он уже включён в $source или statement завершён replace-блоком) */
+            if (i < tokens->size && tokens->data[i].type == TOK_SEMICOLON)
+                i++;
+
+            /* stmt_start уже обновлён выше в else-ветке */
         }
 
         if (!matched) {
-            vt_push_back(result, tokens->data[i]);
+            Token *t = &tokens->data[i];
+            vt_push_back(result, *t);
+            /* обновляем stmt_start после разделителей statement */
+            if (t->type == TOK_SEMICOLON ||
+                strcmp(t->value, "{") == 0 ||
+                strcmp(t->value, "}") == 0)
+            {
+                stmt_start = (int)result->size;
+            }
             i++;
+        } else {
+            /* после replace/check stmt_start = конец вставленного блока */
+            stmt_start = (int)result->size;
         }
     }
 

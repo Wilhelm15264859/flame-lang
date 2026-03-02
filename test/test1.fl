@@ -1,9 +1,0 @@
-class Console {
-    static func void out(char *msg, long len) {
-        x86 mov rax, 1;
-        x86 mov rdi, 1;
-        x86 mov rsi, $msg;
-        x86 mov rdx, $len;
-        x86 syscall;
-    }
-}

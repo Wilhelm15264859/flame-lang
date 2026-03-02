@@ -18,7 +18,7 @@ const char *KEYWORDSfl[] = {
 };
 
 const char *TYPESfl[] = {
-    "int", "short", "long", "char", "float", "double", ((void*)0)
+    "int", "short", "long", "char", "float", "double", ((void*)0), "void",
 };
 
 static int is_keyword(const char *s) {
@@ -129,6 +129,15 @@ static Token next_token(Lexer *lex) {
     if (isdigit(c) || (c == '.' && isdigit(lex->src[lex->pos + 1]))) {
         int i = 0;
         int is_float = 0;
+        if (c == '0' && (lex->src[lex->pos + 1] == 'x' || lex->src[lex->pos + 1] == 'X')) {
+            tok.value[i++] = advance(lex);
+            tok.value[i++] = advance(lex);
+            while (isxdigit(peek(lex)))
+                tok.value[i++] = advance(lex);
+            tok.value[i] = '\0';
+            tok.type = TOK_INT;
+            return tok;
+        }
         while (isdigit(peek(lex))) tok.value[i++] = advance(lex);
         if (peek(lex) == '.') {
             is_float = 1;

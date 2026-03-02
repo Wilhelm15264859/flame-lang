@@ -132,6 +132,13 @@ static LLVMValueRef codegen_var(Node *n) {
         fprintf(stderr, "codegen error: undefined variable '%s'\n", n->str);
         return NULL;
     }
+
+    if (LLVMGetTypeKind(s->type) == LLVMArrayTypeKind) {
+        LLVMValueRef zero = LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0);
+        LLVMValueRef indices[2] = { zero, zero };
+        return LLVMBuildGEP2(builder, s->type, s->value, indices, 2, "arrptr");
+    }
+
     return LLVMBuildLoad2(builder, s->type, s->value, n->str);
 }
 
@@ -148,16 +155,17 @@ static LLVMValueRef codegen_binop(Node *n) {
     int right_is_ptr = LLVMGetTypeKind(LLVMTypeOf(right)) == LLVMPointerTypeKind;
 
     if (left_is_ptr && !right_is_ptr) {
+        LLVMTypeRef pointee = LLVMInt8TypeInContext(ctx);
+        if (n->childs->data[0].type == NODE_VAR) {
+            Symbol *ps = sym_lookup(n->childs->data[0].str);
+            if (ps && ps->elem_type) pointee = ps->elem_type;
+        }
         if (strcmp(op, "+") == 0) {
-            return LLVMBuildGEP2(builder,
-                LLVMInt8TypeInContext(ctx),
-                left, &right, 1, "ptраdd");
+            return LLVMBuildGEP2(builder, pointee, left, &right, 1, "ptradd");
         }
         if (strcmp(op, "-") == 0) {
             LLVMValueRef neg = LLVMBuildNeg(builder, right, "neg");
-            return LLVMBuildGEP2(builder,
-                LLVMInt8TypeInContext(ctx),
-                left, &neg, 1, "ptrsub");
+            return LLVMBuildGEP2(builder, pointee, left, &neg, 1, "ptrsub");
         }
     }
 
@@ -278,19 +286,19 @@ static LLVMValueRef codegen_index(Node *n) {
 
     int is_ptr = LLVMGetTypeKind(s->type) == LLVMPointerTypeKind;
 
-    LLVMValueRef base;
+    LLVMValueRef ptr;
     LLVMTypeRef  elem_type;
 
     if (is_ptr) {
-        base      = LLVMBuildLoad2(builder, s->type, s->value, "ptr");
+        LLVMValueRef base = LLVMBuildLoad2(builder, s->type, s->value, "ptr");
         elem_type = s->elem_type ? s->elem_type : LLVMInt8TypeInContext(ctx);
+        ptr = LLVMBuildGEP2(builder, elem_type, base, &idx, 1, "gep");
     } else {
-        base      = s->value;
-        elem_type = s->type;
+        elem_type = s->elem_type ? s->elem_type : LLVMInt32TypeInContext(ctx);
+        LLVMValueRef zero2 = LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0);
+        LLVMValueRef indices2[2] = { zero2, idx };
+        ptr = LLVMBuildGEP2(builder, s->type, s->value, indices2, 2, "gep");
     }
-
-    LLVMValueRef indices[] = { idx };
-    LLVMValueRef ptr = LLVMBuildGEP2(builder, elem_type, base, indices, 1, "gep");
     return LLVMBuildLoad2(builder, elem_type, ptr, "elem");
 }
 
@@ -329,7 +337,8 @@ static LLVMValueRef codegen_array_def(Node *n) {
         LLVMConstNull(arr_type),
         ptr);
 
-    sym_push(name, ptr, elem_type, 0);
+    sym_push(name, ptr, arr_type, 0);
+    sym_table[sym_count - 1].elem_type = elem_type;
 
     return ptr;
 }
@@ -530,8 +539,8 @@ static LLVMValueRef codegen_func_def(Node *n) {
                 char base[64];
                 strncpy(base, ptype_str, plen - 1);
                 base[plen - 1] = '\0';
-                LLVMTypeRef bt = type_lookup(base);
-                if (bt) elem_type = bt;
+                /* type_lookup ищет только struct'ы, для int/char/etc нужен llvm_type_from_str */
+                elem_type = llvm_type_from_str(base);
             }
 
             if (sym_count < MAX_SYMS) {
@@ -604,8 +613,7 @@ static LLVMValueRef codegen_index_assign(Node *n) {
             LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
             idx
         };
-        LLVMTypeRef arr_type = LLVMArrayType(s->type, 0);
-        ptr = LLVMBuildGEP2(builder, arr_type, s->value, indices, 2, "gep");
+        ptr = LLVMBuildGEP2(builder, s->type, s->value, indices, 2, "gep");
     }
 
     LLVMBuildStore(builder, val, ptr);
@@ -1023,19 +1031,16 @@ static LLVMValueRef codegen_asm(Node *n) {
 }
 
 static LLVMValueRef codegen_i32(Node *n) {
-    return LLVMConstInt(LLVMInt32TypeInContext(ctx), atoll(n->str), 1);
+    return LLVMConstInt(LLVMInt32TypeInContext(ctx), strtoll(n->str, NULL, 0), 1);
 }
-
 static LLVMValueRef codegen_i64(Node *n) {
-    return LLVMConstInt(LLVMInt64TypeInContext(ctx), atoll(n->str), 1);
+    return LLVMConstInt(LLVMInt64TypeInContext(ctx), strtoll(n->str, NULL, 0), 1);
 }
-
 static LLVMValueRef codegen_i8(Node *n) {
-    return LLVMConstInt(LLVMInt8TypeInContext(ctx), atoll(n->str), 1);
+    return LLVMConstInt(LLVMInt8TypeInContext(ctx), strtoll(n->str, NULL, 0), 1);
 }
-
 static LLVMValueRef codegen_i16(Node *n) {
-    return LLVMConstInt(LLVMInt16TypeInContext(ctx), atoll(n->str), 1);
+    return LLVMConstInt(LLVMInt16TypeInContext(ctx), strtoll(n->str, NULL, 0), 1);
 }
 
 static LLVMValueRef codegen_float(Node *n) {
@@ -1188,6 +1193,29 @@ static LLVMValueRef codegen_extern_func_def(Node *n) {
     return func;
 }
 
+static LLVMValueRef codegen_addr_index(Node *n) {
+    Symbol *s = sym_lookup(n->str);
+    if (!s) {
+        fprintf(stderr, "codegen error: undefined variable '%s'\n", n->str);
+        return NULL;
+    }
+    LLVMValueRef idx = codegen_node(&n->childs->data[0]);
+    if (!idx) return NULL;
+
+    if (LLVMGetTypeKind(s->type) == LLVMArrayTypeKind) {
+        LLVMValueRef zero = LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0);
+        LLVMValueRef indices[2] = { zero, idx };
+        return LLVMBuildGEP2(builder, s->type, s->value, indices, 2, "elemptr");
+    } else if (s->elem_type) {
+        LLVMValueRef ptr = LLVMBuildLoad2(builder, s->type, s->value, "");
+        return LLVMBuildGEP2(builder, s->elem_type, ptr, &idx, 1, "elemptr");
+    } else {
+        LLVMValueRef ptr = LLVMBuildLoad2(builder, s->type, s->value, "");
+        LLVMTypeRef elem = LLVMInt32TypeInContext(ctx);
+        return LLVMBuildGEP2(builder, elem, ptr, &idx, 1, "elemptr");
+    }
+}
+
 static LLVMValueRef codegen_node(Node *n) {
     if (!n) return NULL;
 
@@ -1232,6 +1260,7 @@ static LLVMValueRef codegen_node(Node *n) {
         case NODE_DO_WHILE:        return codegen_do_while(n, func);
         case NODE_DELETE:          return codegen_delete(n);
         case NODE_EXTERN_FUNC_DEF: return codegen_extern_func_def(n);
+        case NODE_ADDR_INDEX:      return codegen_addr_index(n);
         case NODE_UNDEF:           return NULL;
         default:                   return NULL;
     }

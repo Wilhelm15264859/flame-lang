@@ -1,0 +1,48 @@
+extern func int   printf(char* fmt);
+
+class Counter {
+    var int value;
+
+    new() {
+        self->value = 0;
+    }
+
+    delete() {
+        printf("Counter destroyed, final value: %d\n", self->value);
+    }
+
+    func void increment() {
+        self->value++;
+    }
+
+    func void add(int n) {
+        self->value = self->value + n;
+    }
+
+    func int get() {
+        return self->value;
+    }
+}
+
+func Counter* make_counter(int start) {
+    var autodel Counter* c = new();
+    c->add(start);
+    return c;
+}
+
+func int main() {
+    printf("=== class tests ===\n");
+
+    var autodel Counter* c = new();
+    c->increment();
+    c->increment();
+    c->add(8);
+    printf("counter = %d\n", c->get());
+
+    printf("--- ownership test ---\n");
+    var Counter* c2 = make_counter(10);
+    c2->increment();
+    printf("c2 = %d\n", c2->get());
+
+    return 0;
+}

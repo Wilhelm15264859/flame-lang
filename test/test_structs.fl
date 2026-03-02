@@ -1,0 +1,29 @@
+extern func int printf(char* fmt);
+
+struct Point {
+    var int x;
+    var int y;
+}
+
+struct Rect {
+    var Point a;
+    var Point b;
+}
+
+func int point_sum(Point p) {
+    return p.x + p.y;
+}
+
+func int main() {
+    printf("=== struct tests ===\n");
+
+    var Point p;
+    p.x = 3;
+    p.y = 4;
+    printf("p.x=%d p.y=%d\n", p.x, p.y);
+
+    var int s = point_sum(p);
+    printf("point_sum = %d\n", s);
+
+    return 0;
+}
