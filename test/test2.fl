@@ -1,8 +1,11 @@
 #include "test1.fl"
 
 func int main() {
-    var autodel int *a = new();
-    a = 0;
+    var autodel long *a = new();
+    *a = 7l;
+
+    var char *msg = "Hello\n\0";
+    Console.out(msg, *a);
 
     return 0;
 }

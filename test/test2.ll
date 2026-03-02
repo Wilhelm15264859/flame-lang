@@ -3,6 +3,8 @@ source_filename = "flame"
 target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
 target triple = "x86_64-pc-linux-gnu"
 
+@str = private unnamed_addr constant [7 x i8] c"Hello\0A\00", align 1
+
 declare ptr @malloc(i64)
 
 declare void @free(ptr)
@@ -26,9 +28,16 @@ entry:
 define i32 @main() {
 entry:
   %a = alloca ptr, align 8
-  %newptr = call ptr @malloc(i64 ptrtoint (ptr getelementptr (i32, ptr null, i32 1) to i64))
+  %newptr = call ptr @malloc(i64 ptrtoint (ptr getelementptr (i64, ptr null, i32 1) to i64))
   store ptr %newptr, ptr %a, align 8
-  store i32 0, ptr %a, align 4
+  %ptr = load ptr, ptr %a, align 8
+  store i64 7, ptr %ptr, align 8
+  %msg = alloca ptr, align 8
+  store ptr @str, ptr %msg, align 8
+  %msg1 = load ptr, ptr %msg, align 8
+  %a2 = load ptr, ptr %a, align 8
+  %deref = load i64, ptr %a2, align 8
+  call void @Console_out(ptr %msg1, i64 %deref)
   %delptr = load ptr, ptr %a, align 8
   call void @free(ptr %delptr)
   ret i32 0
