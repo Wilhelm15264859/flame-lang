@@ -26,6 +26,21 @@ static PatternTokenType spec_to_pat(const char *s) {
     return PAT_LITERAL;
 }
 
+static TokenType tok_type_from_name(const char *name) {
+    if (strcmp(name, "TOK_INT")       == 0) return TOK_INT;
+    if (strcmp(name, "TOK_FLOAT")     == 0) return TOK_FLOAT;
+    if (strcmp(name, "TOK_STRING")    == 0) return TOK_STRING;
+    if (strcmp(name, "TOK_IDENT")     == 0) return TOK_IDENT;
+    if (strcmp(name, "TOK_KEYWORD")   == 0) return TOK_KEYWORD;
+    if (strcmp(name, "TOK_OP")        == 0) return TOK_OP;
+    if (strcmp(name, "TOK_PAREN")     == 0) return TOK_PAREN;
+    if (strcmp(name, "TOK_SEMICOLON") == 0) return TOK_SEMICOLON;
+    if (strcmp(name, "TOK_COMMA")     == 0) return TOK_COMMA;
+    if (strcmp(name, "TOK_TYPE")      == 0) return TOK_TYPE;
+    printf("Warning: unknown token type name '%s'\n", name);
+    return TOK_IDENT;
+}
+
 static int parse_pattern(Token *toks, int len, PatternToken *out) {
     int out_len = 0;
     for (int i = 0; i < len && out_len < MAX_PATTERN_TOKENS; i++) {
@@ -46,15 +61,12 @@ static int parse_pattern(Token *toks, int len, PatternToken *out) {
                 strncpy(left_val, spec->value, 63);
             } else {
                 left_type = spec_to_pat(spec->value);
-                if (left_type == PAT_LITERAL && strcmp(spec->value, "n") != 0 &&
-                    strcmp(spec->value, "i") != 0 && strcmp(spec->value, "k") != 0 &&
-                    strcmp(spec->value, "s") != 0) {
+                if (left_type == PAT_LITERAL)
                     printf("Warning: unknown pattern specifier '%%%s'\n", spec->value);
-                }
             }
 
-            int has_caret  = (i + 1 < len && strcmp(toks[i + 1].value, "^") == 0);
-            int has_colon  = (i + 1 < len && strcmp(toks[i + 1].value, ":") == 0);
+            int has_caret = (i + 1 < len && strcmp(toks[i + 1].value, "^") == 0);
+            int has_colon = (i + 1 < len && strcmp(toks[i + 1].value, ":") == 0);
 
             if (has_caret) {
                 i += 2;
@@ -102,13 +114,13 @@ static int parse_pattern(Token *toks, int len, PatternToken *out) {
                     strncpy(pt.stop_value,  stop_val,      63);
 
                     if (left_is_str) {
-                        pt.capture_type = PAT_LITERAL;
                         PatternToken lit;
                         memset(&lit, 0, sizeof(lit));
                         lit.kind         = PAT_LITERAL;
                         lit.capture_type = PAT_LITERAL;
                         strncpy(lit.value, left_val, 63);
                         out[out_len++] = lit;
+                        pt.capture_type = PAT_LITERAL;
                     }
                     out[out_len++] = pt;
                 } else {
@@ -176,7 +188,6 @@ vector_token *extract_exceptions(vector_token *tokens) {
             i++;
 
             while (i < tokens->size && strcmp(tokens->data[i].value, "}") != 0) {
-
                 if (tokens->data[i].type == TOK_KEYWORD &&
                     strcmp(tokens->data[i].value, "var") == 0)
                 {
@@ -223,10 +234,7 @@ vector_token *extract_exceptions(vector_token *tokens) {
                         break;
                     }
                     int close = find_closing_brace(tokens, (int)i + 1);
-                    if (close < 0) {
-                        printf("Error: unclosed checker block\n");
-                        break;
-                    }
+                    if (close < 0) { printf("Error: unclosed checker block\n"); break; }
                     i++;
                     while ((int)i < close) {
                         if (ex->checker_len < MAX_CHECKER_TOKENS)
@@ -244,10 +252,7 @@ vector_token *extract_exceptions(vector_token *tokens) {
                         break;
                     }
                     int close = find_closing_brace(tokens, (int)i + 1);
-                    if (close < 0) {
-                        printf("Error: unclosed replace block\n");
-                        break;
-                    }
+                    if (close < 0) { printf("Error: unclosed replace block\n"); break; }
                     i++;
                     while ((int)i < close) {
                         if (ex->replace_len < MAX_CHECKER_TOKENS)
@@ -257,9 +262,7 @@ vector_token *extract_exceptions(vector_token *tokens) {
                     i++;
                     ex->has_replace = 1;
                 }
-                else {
-                    i++;
-                }
+                else { i++; }
             }
             i++;
 
@@ -322,33 +325,31 @@ static int try_match(vector_token *tokens, int pos, Exception *ex,
                     Token *cur = &tokens->data[ti];
 
                     int is_until = 0;
-                    if (pt->until_type == PAT_LITERAL) {
+                    if (pt->until_type == PAT_LITERAL)
                         is_until = (strcmp(cur->value, pt->until_value) == 0);
-                    } else if (pt->until_type == PAT_NUMBER) {
+                    else if (pt->until_type == PAT_NUMBER)
                         is_until = (cur->type == TOK_INT || cur->type == TOK_FLOAT);
-                    } else if (pt->until_type == PAT_IDENT) {
+                    else if (pt->until_type == PAT_IDENT)
                         is_until = (cur->type == TOK_IDENT);
-                    } else if (pt->until_type == PAT_KEYWORD) {
+                    else if (pt->until_type == PAT_KEYWORD)
                         is_until = (cur->type == TOK_KEYWORD);
-                    } else if (pt->until_type == PAT_STRING) {
+                    else if (pt->until_type == PAT_STRING)
                         is_until = (cur->type == TOK_STRING);
-                    }
 
                     if (is_until) { found = 1; break; }
 
                     if (pt->has_stop) {
                         int is_stop = 0;
-                        if (pt->stop_type == PAT_LITERAL) {
+                        if (pt->stop_type == PAT_LITERAL)
                             is_stop = (strcmp(cur->value, pt->stop_value) == 0);
-                        } else if (pt->stop_type == PAT_NUMBER) {
+                        else if (pt->stop_type == PAT_NUMBER)
                             is_stop = (cur->type == TOK_INT || cur->type == TOK_FLOAT);
-                        } else if (pt->stop_type == PAT_IDENT) {
+                        else if (pt->stop_type == PAT_IDENT)
                             is_stop = (cur->type == TOK_IDENT);
-                        } else if (pt->stop_type == PAT_KEYWORD) {
+                        else if (pt->stop_type == PAT_KEYWORD)
                             is_stop = (cur->type == TOK_KEYWORD);
-                        } else if (pt->stop_type == PAT_STRING) {
+                        else if (pt->stop_type == PAT_STRING)
                             is_stop = (cur->type == TOK_STRING);
-                        }
                         if (is_stop) { found = 1; break; }
                     }
 
@@ -366,21 +367,11 @@ static int try_match(vector_token *tokens, int pos, Exception *ex,
             case PAT_CAPTURE: {
                 int type_ok = 1;
                 switch (pt->capture_type) {
-                    case PAT_NUMBER:
-                        type_ok = (t->type == TOK_INT || t->type == TOK_FLOAT);
-                        break;
-                    case PAT_IDENT:
-                        type_ok = (t->type == TOK_IDENT);
-                        break;
-                    case PAT_KEYWORD:
-                        type_ok = (t->type == TOK_KEYWORD);
-                        break;
-                    case PAT_STRING:
-                        type_ok = (t->type == TOK_STRING);
-                        break;
-                    default:
-                        type_ok = 1;
-                        break;
+                    case PAT_NUMBER:  type_ok = (t->type == TOK_INT || t->type == TOK_FLOAT); break;
+                    case PAT_IDENT:   type_ok = (t->type == TOK_IDENT);   break;
+                    case PAT_KEYWORD: type_ok = (t->type == TOK_KEYWORD); break;
+                    case PAT_STRING:  type_ok = (t->type == TOK_STRING);  break;
+                    default:          type_ok = 1; break;
                 }
                 if (!type_ok) return -1;
                 strncpy(captures[pi], t->value, 63);
@@ -402,11 +393,13 @@ static void build_capture_inits(Exception *ex,
                                  char      unique_names[MAX_PATTERN_TOKENS][64])
 {
     for (int pi = 0; pi < ex->pattern_len; pi++) {
-        if (ex->pattern[pi].kind != PAT_CAPTURE) continue;
+        if (ex->pattern[pi].kind != PAT_CAPTURE &&
+            ex->pattern[pi].kind != PAT_CAPTURE_UNTIL) continue;
 
         const char *cap_name = ex->pattern[pi].value;
         const char *cap_val  = captures[pi];
         TokenType   cap_type = capture_types[pi];
+
         char field_type[64] = "int";
         for (int fi = 0; fi < ex->field_count - 2; fi++) {
             if (ex->fields[fi].type == TOK_KEYWORD &&
@@ -427,12 +420,12 @@ static void build_capture_inits(Exception *ex,
                field_type, cap_name, cap_val, cap_type, unique_names[pi]);
 
         Token t;
-        t.type = TOK_KEYWORD;   strncpy(t.value, "var",              63); vt_push_back(out, t);
-        t.type = TOK_TYPE;      strncpy(t.value, field_type,         63); vt_push_back(out, t);
-        t.type = TOK_IDENT;     strncpy(t.value, unique_names[pi],   63); vt_push_back(out, t);
-        t.type = TOK_OP;        strncpy(t.value, "=",                63); vt_push_back(out, t);
-        t.type = cap_type;      strncpy(t.value, cap_val,            63); vt_push_back(out, t);
-        t.type = TOK_SEMICOLON; strncpy(t.value, ";",                63); vt_push_back(out, t);
+        t.type = TOK_KEYWORD;   strncpy(t.value, "var",            63); vt_push_back(out, t);
+        t.type = TOK_TYPE;      strncpy(t.value, field_type,       63); vt_push_back(out, t);
+        t.type = TOK_IDENT;     strncpy(t.value, unique_names[pi], 63); vt_push_back(out, t);
+        t.type = TOK_OP;        strncpy(t.value, "=",              63); vt_push_back(out, t);
+        t.type = cap_type;      strncpy(t.value, cap_val,          63); vt_push_back(out, t);
+        t.type = TOK_SEMICOLON; strncpy(t.value, ";",              63); vt_push_back(out, t);
     }
 }
 
@@ -443,7 +436,8 @@ static void rename_captures_in_block(Token *toks, int len,
     for (int ti = 0; ti < len; ti++) {
         if (toks[ti].type != TOK_IDENT) continue;
         for (int pi = 0; pi < ex->pattern_len; pi++) {
-            if (ex->pattern[pi].kind != PAT_CAPTURE) continue;
+            if (ex->pattern[pi].kind != PAT_CAPTURE &&
+                ex->pattern[pi].kind != PAT_CAPTURE_UNTIL) continue;
             if (strcmp(toks[ti].value, ex->pattern[pi].value) == 0) {
                 strncpy(toks[ti].value, unique_names[pi], 63);
                 break;
@@ -525,6 +519,7 @@ vector_token *preparse(vector_token *tokens) {
                         ci + 1 < ex->replace_len &&
                         strcmp(replace_copy[ci + 1].value, "source") == 0)
                     {
+                        /* $source */
                         int next_is_semi = (ci + 2 < ex->replace_len &&
                             replace_copy[ci + 2].type == TOK_SEMICOLON);
                         int emit_len = next_is_semi ? source_len - 1 : source_len;
@@ -533,16 +528,22 @@ vector_token *preparse(vector_token *tokens) {
                         ci++;
                     } else if (rt->type == TOK_OP && strcmp(rt->value, "$") == 0 &&
                                ci + 1 < ex->replace_len &&
-                               replace_copy[ci + 1].type == TOK_INT)
+                               replace_copy[ci + 1].type == TOK_OP &&
+                               strcmp(replace_copy[ci + 1].value, "%") == 0 &&
+                               ci + 2 < ex->replace_len &&
+                               replace_copy[ci + 2].type == TOK_IDENT &&
+                               ci + 3 < ex->replace_len &&
+                               replace_copy[ci + 3].type == TOK_STRING)
                     {
-                        int offset = atoi(replace_copy[ci + 1].value);
-                        int abs_idx = (int)i + offset;
-                        if (abs_idx >= 0 && (unsigned)abs_idx < tokens->size)
-                            vt_push_back(result, tokens->data[abs_idx]);
-                        else
-                            printf("Warning: $%d out of bounds (pos=%d, tokens=%d)\n",
-                                   offset, (int)i, (int)tokens->size);
-                        ci++;
+                        /* $%TOK_IDENT "value" — синтетический токен */
+                        Token synth;
+                        synth.type = tok_type_from_name(replace_copy[ci + 2].value);
+                        synth.line = 0;
+                        synth.col  = 0;
+                        strncpy(synth.value, replace_copy[ci + 3].value, 63);
+                        synth.value[63] = '\0';
+                        vt_push_back(result, synth);
+                        ci += 3;
                     } else if (rt->type == TOK_OP && strcmp(rt->value, "$") == 0 &&
                                ci + 1 < ex->replace_len &&
                                replace_copy[ci + 1].type == TOK_OP &&
@@ -550,7 +551,8 @@ vector_token *preparse(vector_token *tokens) {
                                ci + 2 < ex->replace_len &&
                                replace_copy[ci + 2].type == TOK_INT)
                     {
-                        int offset = -atoi(replace_copy[ci + 2].value);
+                        /* $-N — токен позади начала совпадения */
+                        int offset  = -atoi(replace_copy[ci + 2].value);
                         int abs_idx = (int)i + offset;
                         if (abs_idx >= 0 && (unsigned)abs_idx < tokens->size)
                             vt_push_back(result, tokens->data[abs_idx]);
@@ -558,6 +560,19 @@ vector_token *preparse(vector_token *tokens) {
                             printf("Warning: $-%s out of bounds (pos=%d)\n",
                                    replace_copy[ci + 2].value, (int)i);
                         ci += 2;
+                    } else if (rt->type == TOK_OP && strcmp(rt->value, "$") == 0 &&
+                               ci + 1 < ex->replace_len &&
+                               replace_copy[ci + 1].type == TOK_INT)
+                    {
+                        /* $N — токен с offset N от начала совпадения */
+                        int offset  = atoi(replace_copy[ci + 1].value);
+                        int abs_idx = (int)i + offset;
+                        if (abs_idx >= 0 && (unsigned)abs_idx < tokens->size)
+                            vt_push_back(result, tokens->data[abs_idx]);
+                        else
+                            printf("Warning: $%d out of bounds (pos=%d, tokens=%d)\n",
+                                   offset, (int)i, (int)tokens->size);
+                        ci++;
                     } else {
                         vt_push_back(result, *rt);
                     }

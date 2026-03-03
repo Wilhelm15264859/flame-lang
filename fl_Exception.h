@@ -4,7 +4,6 @@
 #define MAX_CHECKER_TOKENS 512
 #define MAX_EXCEPTIONS     32
 #define MAX_FIELDS         16
-
 typedef enum {
     PAT_LITERAL,
     PAT_IDENT,
@@ -14,8 +13,7 @@ typedef enum {
     PAT_CAPTURE,
     PAT_CAPTURE_UNTIL,
 } PatternTokenType;
-
-    typedef struct {
+typedef struct {
     PatternTokenType kind;
     char             value[64];
     PatternTokenType capture_type;
@@ -25,7 +23,6 @@ typedef enum {
     char             stop_value[64];
     int              has_stop;
 } PatternToken;
-
 typedef struct {
     char         name[64];
     Token        fields[MAX_FIELDS * 8];
@@ -38,7 +35,6 @@ typedef struct {
     int          replace_len;
     int          has_replace;
 } Exception;
-
 extern Exception exceptions[MAX_EXCEPTIONS];
 extern int       exception_count;
 vector_token *extract_exceptions(vector_token *tokens);
