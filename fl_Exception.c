@@ -531,6 +531,33 @@ vector_token *preparse(vector_token *tokens) {
                         for (int s2 = 0; s2 < emit_len; s2++)
                             vt_push_back(result, source[s2]);
                         ci++;
+                    } else if (rt->type == TOK_OP && strcmp(rt->value, "$") == 0 &&
+                               ci + 1 < ex->replace_len &&
+                               replace_copy[ci + 1].type == TOK_INT)
+                    {
+                        int offset = atoi(replace_copy[ci + 1].value);
+                        int abs_idx = (int)i + offset;
+                        if (abs_idx >= 0 && (unsigned)abs_idx < tokens->size)
+                            vt_push_back(result, tokens->data[abs_idx]);
+                        else
+                            printf("Warning: $%d out of bounds (pos=%d, tokens=%d)\n",
+                                   offset, (int)i, (int)tokens->size);
+                        ci++;
+                    } else if (rt->type == TOK_OP && strcmp(rt->value, "$") == 0 &&
+                               ci + 1 < ex->replace_len &&
+                               replace_copy[ci + 1].type == TOK_OP &&
+                               strcmp(replace_copy[ci + 1].value, "-") == 0 &&
+                               ci + 2 < ex->replace_len &&
+                               replace_copy[ci + 2].type == TOK_INT)
+                    {
+                        int offset = -atoi(replace_copy[ci + 2].value);
+                        int abs_idx = (int)i + offset;
+                        if (abs_idx >= 0 && (unsigned)abs_idx < tokens->size)
+                            vt_push_back(result, tokens->data[abs_idx]);
+                        else
+                            printf("Warning: $-%s out of bounds (pos=%d)\n",
+                                   replace_copy[ci + 2].value, (int)i);
+                        ci += 2;
                     } else {
                         vt_push_back(result, *rt);
                     }
