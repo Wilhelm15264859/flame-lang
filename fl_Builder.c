@@ -14,6 +14,22 @@
 
 static int get_field_index(LLVMTypeRef struct_type, const char *field_name);
 
+static LLVMValueRef find_func_by_prefix(const char *base_name) {
+    LLVMValueRef f = LLVMGetNamedFunction(mod, base_name);
+    if (f) return f;
+
+    char prefix[132];
+    snprintf(prefix, sizeof(prefix), "_%s_", base_name);
+    int plen = (int)strlen(prefix);
+
+    for (LLVMValueRef fn = LLVMGetFirstFunction(mod); fn; fn = LLVMGetNextFunction(fn)) {
+        const char *fn_name = LLVMGetValueName(fn);
+        if (strncmp(fn_name, prefix, plen) == 0)
+            return fn;
+    }
+    return NULL;
+}
+
 typedef struct {
     char        name[64];
     LLVMTypeRef type;
@@ -25,6 +41,7 @@ typedef struct {
     char        field_names[64][64];
     LLVMTypeRef field_types[64];
     int         field_count;
+    char        parent_name[64];
 } StructInfo;
 
 static StructInfo struct_info[MAX_TYPES];
@@ -49,6 +66,35 @@ static void type_push(const char *name, LLVMTypeRef type) {
     strncpy(type_table[type_count].name, name, 63);
     type_table[type_count].type = type;
     type_count++;
+}
+static StructInfo* find_struct_info_by_name(const char *name) {
+    for (int i = 0; i < struct_info_count; i++) {
+        if (strcmp(struct_info[i].name, name) == 0)
+            return &struct_info[i];
+    }
+    return NULL;
+}
+
+static int collect_all_fields(const char *class_name,
+                               char all_fields[64][64],
+                               LLVMTypeRef all_field_types[64])
+{
+    StructInfo *info = find_struct_info_by_name(class_name);
+    if (!info) return 0;
+
+    int total_count = 0;
+
+    if (info->parent_name[0] != '\0') {
+        total_count = collect_all_fields(info->parent_name, all_fields, all_field_types);
+    }
+
+    for (int i = 0; i < info->field_count && total_count < 64; i++) {
+        strncpy(all_fields[total_count], info->field_names[i], 63);
+        all_field_types[total_count] = info->field_types[i];
+        total_count++;
+    }
+
+    return total_count;
 }
 
 static LLVMTypeRef type_lookup(const char *name) {
@@ -355,6 +401,8 @@ static LLVMValueRef codegen_func_call(Node *n) {
         ftype = s->type;
     } else {
         func = LLVMGetNamedFunction(mod, fname);
+        if (!func)
+            func = find_func_by_prefix(fname);
         if (!func) {
             fprintf(stderr, "codegen error: undefined function '%s'\n", fname);
             return NULL;
@@ -539,7 +587,6 @@ static LLVMValueRef codegen_func_def(Node *n) {
                 char base[64];
                 strncpy(base, ptype_str, plen - 1);
                 base[plen - 1] = '\0';
-                /* type_lookup ищет только struct'ы, для int/char/etc нужен llvm_type_from_str */
                 elem_type = llvm_type_from_str(base);
             }
 
@@ -621,9 +668,34 @@ static LLVMValueRef codegen_index_assign(Node *n) {
 }
 
 static LLVMValueRef codegen_struct_def(Node *n) {
+    const char *full_name = n->str;
+    char class_name[64] = "";
+    char parent_name[64] = "";
+    
+    char *delim = strchr(full_name, '<');
+    if (delim) {
+        int len = delim - full_name;
+        strncpy(class_name, full_name, len);
+        class_name[len] = '\0';
+        strncpy(parent_name, delim + 1, 63);
+    } else {
+        strncpy(class_name, full_name, 63);
+    }
+    
     unsigned field_count = 0;
     LLVMTypeRef field_types[64];
     char field_names[64][64];
+    
+    if (parent_name[0] != '\0') {
+        StructInfo *parent = find_struct_info_by_name(parent_name);
+        if (parent) {
+            for (int i = 0; i < parent->field_count && field_count < 64; i++) {
+                field_types[field_count] = parent->field_types[i];
+                strncpy(field_names[field_count], parent->field_names[i], 63);
+                field_count++;
+            }
+        }
+    }
 
     for (unsigned j = 0; j < (unsigned)n->childs->size && field_count < 64; j++) {
         Node *child = &n->childs->data[j];
@@ -685,7 +757,6 @@ static LLVMValueRef codegen_struct_def(Node *n) {
 
         sym_push(global_name, gvar, gtype, 0);
 
-        // инициализатор если есть
         if (child->childs->size >= 3 && child->childs->data[2].type != NODE_UNDEF) {
             fprintf(stderr, "codegen warning: static field '%s' initializer ignored (use runtime init)\n", global_name);
         }
@@ -697,7 +768,6 @@ static LLVMValueRef codegen_struct_def(Node *n) {
             codegen_func_def(child);
     }
 
-    // статические методы (без self)
     for (unsigned j = 0; j < (unsigned)n->childs->size; j++) {
         Node *child = &n->childs->data[j];
         if (child->type == NODE_STATIC_FUNC_DEF)
@@ -724,7 +794,7 @@ static void codegen_new(Node *n, LLVMValueRef var_ptr, LLVMTypeRef elem_type) {
 
     char init_name[128];
     snprintf(init_name, sizeof(init_name), "%s_new", n->str);
-    LLVMValueRef init_fn = LLVMGetNamedFunction(mod, init_name);
+    LLVMValueRef init_fn = find_func_by_prefix(init_name);
     if (init_fn) {
         LLVMTypeRef  init_type = LLVMGlobalGetValueType(init_fn);
         LLVMValueRef args[65];
@@ -1141,7 +1211,7 @@ static LLVMValueRef codegen_delete(Node *n) {
         if (struct_name) {
             char dtor_name[128];
             snprintf(dtor_name, sizeof(dtor_name), "%s_delete", struct_name);
-            LLVMValueRef dtor = LLVMGetNamedFunction(mod, dtor_name);
+            LLVMValueRef dtor = find_func_by_prefix(dtor_name);
             if (dtor) {
                 LLVMTypeRef  dtor_type = LLVMGlobalGetValueType(dtor);
 

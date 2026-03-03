@@ -5,6 +5,7 @@
 
 #define MAX_AUTODEL 64
 #define MAX_OWNERSHIP_FUNCS 64
+#define MAX_ALIASES 16
 
 static int  autodel_counter      = 0;
 static int  ownership_func_count = 0;
@@ -27,6 +28,8 @@ static int ownership_func_lookup(const char *name) {
 typedef struct {
     char name[64];
     char base_type[64];
+    char aliases[MAX_ALIASES][64];
+    int  alias_count;
 } AutodelVar;
 
 static Node *make_node(NodeType type, const char *str) {
@@ -54,6 +57,13 @@ static int node_uses_var(Node *n, const char *name) {
         for (unsigned long long j = 0; j < n->childs->size; j++)
             if (node_uses_var(&n->childs->data[j], name))
                 return 1;
+    return 0;
+}
+
+static int node_uses_any_alias(Node *n, AutodelVar *av) {
+    if (node_uses_var(n, av->name)) return 1;
+    for (int k = 0; k < av->alias_count; k++)
+        if (node_uses_var(n, av->aliases[k])) return 1;
     return 0;
 }
 
@@ -230,6 +240,104 @@ static void patch_ownership_vardefs(vector_node *nodes, int start, int end) {
     }
 }
 
+static int find_autodel_by_name(AutodelVar *vars, int count, const char *name) {
+    for (int i = 0; i < count; i++)
+        if (vars[i].name[0] != '\0' && strcmp(vars[i].name, name) == 0)
+            return i;
+    return -1;
+}
+
+static void register_alias(AutodelVar *vars, int count, int ai, const char *alias_name) {
+    for (int i = 0; i < count; i++) {
+        if (i == ai) continue;
+        for (int k = 0; k < vars[i].alias_count; k++) {
+            if (strcmp(vars[i].aliases[k], alias_name) == 0) {
+                printf("DEBUG pregen: merging alias group '%s' into '%s'\n",
+                       vars[i].name, vars[ai].name);
+                for (int m = 0; m < vars[i].alias_count; m++) {
+                    int dup = 0;
+                    for (int n2 = 0; n2 < vars[ai].alias_count; n2++)
+                        if (strcmp(vars[ai].aliases[n2], vars[i].aliases[m]) == 0) { dup = 1; break; }
+                    if (!dup && vars[ai].alias_count < MAX_ALIASES)
+                        strncpy(vars[ai].aliases[vars[ai].alias_count++], vars[i].aliases[m], 63);
+                }
+                if (vars[ai].alias_count < MAX_ALIASES)
+                    strncpy(vars[ai].aliases[vars[ai].alias_count++], vars[i].name, 63);
+                vars[i].name[0] = '\0';
+                return;
+            }
+        }
+    }
+
+    for (int k = 0; k < vars[ai].alias_count; k++)
+        if (strcmp(vars[ai].aliases[k], alias_name) == 0) return;
+    if (vars[ai].alias_count < MAX_ALIASES) {
+        strncpy(vars[ai].aliases[vars[ai].alias_count++], alias_name, 63);
+        printf("DEBUG pregen: '%s' is now an alias of autodel '%s'\n",
+               alias_name, vars[ai].name);
+    }
+}
+
+static void collect_aliases(vector_node *nodes, int start, int end,
+                             AutodelVar *vars, int count)
+{
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (int j = start; j < end; j++) {
+            Node *n = &nodes->data[j];
+
+            if (n->type == NODE_VAR_DEF && n->childs->size >= 3) {
+                Node *init = &n->childs->data[2];
+                if (init->type == NODE_VAR && init->str && init->str[0]) {
+                    const char *src  = init->str;
+                    const char *dest = n->childs->data[1].str;
+
+                    int ai = find_autodel_by_name(vars, count, src);
+                    if (ai < 0) {
+                        for (int i = 0; i < count && ai < 0; i++)
+                            for (int k = 0; k < vars[i].alias_count; k++)
+                                if (strcmp(vars[i].aliases[k], src) == 0) { ai = i; break; }
+                    }
+                    if (ai >= 0) {
+                        int already = 0;
+                        for (int k = 0; k < vars[ai].alias_count; k++)
+                            if (strcmp(vars[ai].aliases[k], dest) == 0) { already = 1; break; }
+                        if (!already) {
+                            register_alias(vars, count, ai, dest);
+                            changed = 1;
+                        }
+                    }
+                }
+            }
+
+            if (n->type == NODE_ASSIGN && n->childs->size >= 3) {
+                Node *rhs = &n->childs->data[2];
+                if (rhs->type == NODE_VAR && rhs->str && rhs->str[0]) {
+                    const char *src  = rhs->str;
+                    const char *dest = n->childs->data[0].str;
+
+                    int ai = find_autodel_by_name(vars, count, src);
+                    if (ai < 0) {
+                        for (int i = 0; i < count && ai < 0; i++)
+                            for (int k = 0; k < vars[i].alias_count; k++)
+                                if (strcmp(vars[i].aliases[k], src) == 0) { ai = i; break; }
+                    }
+                    if (ai >= 0) {
+                        int already = 0;
+                        for (int k = 0; k < vars[ai].alias_count; k++)
+                            if (strcmp(vars[ai].aliases[k], dest) == 0) { already = 1; break; }
+                        if (!already) {
+                            register_alias(vars, count, ai, dest);
+                            changed = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void pregen_scope(vector_node *nodes, int start, int end) {
     for (int j = start; j < end; j++) {
         Node *n = &nodes->data[j];
@@ -279,9 +387,12 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
 
         strncpy(autodel_vars[autodel_count].name,      var_name, 63);
         strncpy(autodel_vars[autodel_count].base_type, base,     63);
+        autodel_vars[autodel_count].alias_count = 0;
         autodel_count++;
         printf("DEBUG pregen: autodel var '%s' base '%s'\n", var_name, base);
     }
+
+    collect_aliases(nodes, start, end, autodel_vars, autodel_count);
 
     for (int j = start; j < end; j++) {
         Node *n = &nodes->data[j];
@@ -291,11 +402,19 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
 
         for (int ai = 0; ai < autodel_count; ai++) {
             const char *aname = autodel_vars[ai].name;
-            if (aname[0] == '\0') continue;
-            if (!node_uses_var(ret_expr, aname)) continue;
+            if (!aname || aname[0] == '\0') continue;
+            if (!node_uses_any_alias(ret_expr, &autodel_vars[ai])) continue;
 
-            if (ret_expr->type == NODE_VAR && strcmp(ret_expr->str, aname) == 0) {
-                printf("DEBUG pregen: '%s' escapes\n", aname);
+            int direct_escape = 0;
+            if (ret_expr->type == NODE_VAR) {
+                if (strcmp(ret_expr->str, aname) == 0) direct_escape = 1;
+                for (int k = 0; k < autodel_vars[ai].alias_count && !direct_escape; k++)
+                    if (strcmp(ret_expr->str, autodel_vars[ai].aliases[k]) == 0)
+                        direct_escape = 1;
+            }
+
+            if (direct_escape) {
+                printf("DEBUG pregen: '%s' (or alias) escapes via return\n", aname);
                 autodel_vars[ai].name[0] = '\0';
                 break;
             }
@@ -322,14 +441,18 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
 
     for (int ai = 0; ai < autodel_count; ai++) {
         const char *name = autodel_vars[ai].name;
-        if (name[0] == '\0') continue;
-
+        if (!name || name[0] == '\0') continue;
         int last = -1;
         for (int j = start; j < end; j++)
-            if (node_uses_var(&nodes->data[j], name)) last = j;
+            if (node_uses_any_alias(&nodes->data[j], &autodel_vars[ai]))
+                last = j;
         if (last < 0) continue;
 
-        printf("DEBUG pregen: delete '%s' after index %d\n", name, last);
+        printf("DEBUG pregen: delete '%s' after index %d (aliases: %d)\n",
+               name, last, autodel_vars[ai].alias_count);
+        for (int k = 0; k < autodel_vars[ai].alias_count; k++)
+            printf("  alias: '%s'\n", autodel_vars[ai].aliases[k]);
+
         Node del = make_delete_node(name);
         vn_insert_at(nodes, last + 1, del);
         end++;

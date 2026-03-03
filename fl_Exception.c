@@ -252,8 +252,6 @@ static void build_capture_inits(Exception *ex,
             }
         }
 
-        /* уникальное имя: _ex_<cap_name>_<counter>
-         * cap_name <= 48 chars, "_ex_"=4, "_"=1, counter<=10 → max 63 */
         char cap_trunc[49];
         strncpy(cap_trunc, cap_name, 48);
         cap_trunc[48] = '\0';
@@ -272,7 +270,6 @@ static void build_capture_inits(Exception *ex,
     }
 }
 
-/* заменяет вхождения оригинальных capture-имён на уникальные в блоке токенов */
 static void rename_captures_in_block(Token *toks, int len,
                                       Exception *ex,
                                       char unique_names[MAX_PATTERN_TOKENS][64])
@@ -298,7 +295,7 @@ vector_token *preparse(vector_token *tokens) {
         printf("  [%d] type=%d value='%s'\n", di, tokens->data[di].type, tokens->data[di].value);
 
     unsigned i = 0;
-    int stmt_start = 0;  /* индекс в result где начался текущий statement */
+    int stmt_start = 0;
     while (i < tokens->size) {
         int matched = 0;
 
@@ -324,12 +321,10 @@ vector_token *preparse(vector_token *tokens) {
                 continue;
             }
 
-            /* уникальные имена capture-переменных для этого матча */
             char unique_names[MAX_PATTERN_TOKENS][64];
             memset(unique_names, 0, sizeof(unique_names));
 
             if (ex->has_replace) {
-                /* используем stmt_start — точно начало текущего statement */
                 int inject_pos = stmt_start;
 
                 int    suffix_len = (int)result->size - inject_pos;
@@ -353,7 +348,6 @@ vector_token *preparse(vector_token *tokens) {
 
                 build_capture_inits(ex, captures, capture_types, result, unique_names);
 
-                /* копируем replace-блок и переименовываем capture-переменные */
                 Token *replace_copy = malloc(sizeof(Token) * ex->replace_len);
                 memcpy(replace_copy, ex->replace, sizeof(Token) * ex->replace_len);
                 rename_captures_in_block(replace_copy, ex->replace_len, ex, unique_names);
@@ -365,8 +359,6 @@ vector_token *preparse(vector_token *tokens) {
                         ci + 1 < ex->replace_len &&
                         strcmp(replace_copy[ci + 1].value, "source") == 0)
                     {
-                        /* если после $source в replace стоит ';', не вставляем
-                         * финальный ';' из source — иначе получится двойной ;; */
                         int next_is_semi = (ci + 2 < ex->replace_len &&
                             replace_copy[ci + 2].type == TOK_SEMICOLON);
                         int emit_len = next_is_semi ? source_len - 1 : source_len;
@@ -383,7 +375,6 @@ vector_token *preparse(vector_token *tokens) {
                 free(source);
 
             } else {
-                /* используем stmt_start — точно начало текущего statement */
                 int inject_pos = stmt_start;
 
                 int    suffix_len = (int)result->size - inject_pos;
@@ -396,7 +387,6 @@ vector_token *preparse(vector_token *tokens) {
 
                 build_capture_inits(ex, captures, capture_types, result, unique_names);
 
-                /* копируем check-блок и переименовываем capture-переменные */
                 Token *checker_copy = malloc(sizeof(Token) * ex->checker_len);
                 memcpy(checker_copy, ex->checker, sizeof(Token) * ex->checker_len);
                 rename_captures_in_block(checker_copy, ex->checker_len, ex, unique_names);
@@ -413,8 +403,6 @@ vector_token *preparse(vector_token *tokens) {
 
                 for (int mi = 0; mi < match_len; mi++)
                     vt_push_back(result, tokens->data[i + mi]);
-
-                /* добавляем ';' в result для check — он будет пропущен из input ниже */
                 {
                     Token semi;
                     semi.type = TOK_SEMICOLON;
@@ -425,18 +413,13 @@ vector_token *preparse(vector_token *tokens) {
 
             i += match_len;
 
-            /* пропускаем финальный ';' оригинального statement из входного потока
-             * (он уже включён в $source или statement завершён replace-блоком) */
             if (i < tokens->size && tokens->data[i].type == TOK_SEMICOLON)
                 i++;
-
-            /* stmt_start уже обновлён выше в else-ветке */
         }
 
         if (!matched) {
             Token *t = &tokens->data[i];
             vt_push_back(result, *t);
-            /* обновляем stmt_start после разделителей statement */
             if (t->type == TOK_SEMICOLON ||
                 strcmp(t->value, "{") == 0 ||
                 strcmp(t->value, "}") == 0)
@@ -445,7 +428,6 @@ vector_token *preparse(vector_token *tokens) {
             }
             i++;
         } else {
-            /* после replace/check stmt_start = конец вставленного блока */
             stmt_start = (int)result->size;
         }
     }

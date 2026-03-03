@@ -105,7 +105,7 @@ static Token next_token(Lexer *lex) {
         int i = 0;
         while (peek(lex) && peek(lex) != '"') {
             if (peek(lex) == '\\') {
-                advance(lex);  /* съедаем \ */
+                advance(lex);
                 char esc = advance(lex);
                 switch (esc) {
                     case 'n':  tok.value[i++] = '\n'; break;
@@ -167,6 +167,13 @@ static Token next_token(Lexer *lex) {
         while (isalnum(peek(lex)) || peek(lex) == '_')
             tok.value[i++] = advance(lex);
         tok.value[i] = '\0';
+        if (tok.value[0] == '_') {
+            fprintf(stderr, "Lexer ERROR: identifiers starting with '_' are reserved "
+                    "(mangling namespace), got '%s' at line %d col %d\n",
+                    tok.value, lex->line, lex->col);
+            tok.type = TOK_ERROR;
+            return tok;
+        }
         if (is_type(tok.value))
             tok.type = TOK_TYPE;
         else if (is_keyword(tok.value))

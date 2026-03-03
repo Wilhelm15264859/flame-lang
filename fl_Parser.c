@@ -23,6 +23,380 @@ static const char *var_type_lookup(const char *var) {
     return NULL;
 }
 
+#define MAX_OVERLOADS      256
+#define MAX_OVERLOAD_PARAMS 16
+
+typedef struct {
+    char base_name[64];
+    char mangled[128];
+    char param_types[MAX_OVERLOAD_PARAMS][64];
+    int  param_count;
+    char ret_type[64];
+} OverloadEntry;
+
+static OverloadEntry overload_table[MAX_OVERLOADS];
+static int           overload_count = 0;
+
+static void overload_push(const char *base, const char *mangled,
+                           const char param_types[][64], int param_count,
+                           const char *ret_type)
+{
+    for (int i = 0; i < overload_count; i++) {
+        if (strcmp(overload_table[i].mangled, mangled) == 0) return;
+    }
+    if (overload_count >= MAX_OVERLOADS) {
+        printf("Error: overload table overflow\n");
+        return;
+    }
+    OverloadEntry *e = &overload_table[overload_count++];
+    strncpy(e->base_name, base,    63);
+    strncpy(e->mangled,   mangled, 127);
+    strncpy(e->ret_type,  ret_type ? ret_type : "void", 63);
+    e->param_count = param_count < MAX_OVERLOAD_PARAMS
+                   ? param_count : MAX_OVERLOAD_PARAMS;
+    for (int i = 0; i < e->param_count; i++)
+        strncpy(e->param_types[i], param_types[i], 63);
+}
+
+static void build_mangled_name(const char *base,
+                                const char param_types[][64], int param_count,
+                                char *out, int out_size)
+{
+    int pos = 0;
+    out[pos++] = '_';
+    for (int i = 0; base[i] && pos < out_size - 1; i++)
+        out[pos++] = base[i];
+    out[pos++] = '_';
+
+    for (int i = 0; i < param_count && pos < out_size - 1; i++) {
+        const char *t = param_types[i];
+        if (strncmp(t, "autodel:", 8) == 0) t += 8;
+        for (; *t && pos < out_size - 1; t++) {
+            if (*t == '*' || *t == ' ') continue;
+            out[pos++] = (char)tolower((unsigned char)*t);
+        }
+    }
+    out[pos] = '\0';
+}
+
+static void normalize_type(const char *src, char *out, int out_size) {
+    if (strncmp(src, "autodel:", 8) == 0) src += 8;
+    int j = 0;
+    for (; *src && j < out_size - 1; src++)
+        if (*src != '*' && *src != ' ')
+            out[j++] = (char)tolower((unsigned char)*src);
+    out[j] = '\0';
+}
+
+static int node_infer_type(Node *n, char *out, int out_size) {
+    if (!n) return 0;
+    switch (n->type) {
+        case NODE_I32:    strncpy(out, "int",    out_size - 1); return 1;
+        case NODE_I64:    strncpy(out, "long",   out_size - 1); return 1;
+        case NODE_I16:    strncpy(out, "short",  out_size - 1); return 1;
+        case NODE_I8:     strncpy(out, "char",   out_size - 1); return 1;
+        case NODE_FLOAT:  strncpy(out, "float",  out_size - 1); return 1;
+        case NODE_DOUBLE: strncpy(out, "double", out_size - 1); return 1;
+        case NODE_STRING: strncpy(out, "char*",  out_size - 1); return 1;
+        case NODE_VAR:
+        case NODE_IDENT: {
+            const char *vt = var_type_lookup(n->str);
+            if (vt) { strncpy(out, vt, out_size - 1); return 1; }
+            return 0;
+        }
+        case NODE_FUNC_CALL: {
+            for (int i = 0; i < overload_count; i++) {
+                if (strcmp(overload_table[i].mangled, n->str) == 0) {
+                    strncpy(out, overload_table[i].ret_type, out_size - 1);
+                    return 1;
+                }
+            }
+            return 0;
+        }
+        case NODE_MEMBER_DOT:
+        case NODE_MEMBER_ARROW: {
+            return 0;
+        }
+        case NODE_BINOP: {
+            if (n->childs && n->childs->size >= 1)
+                return node_infer_type(&n->childs->data[0], out, out_size);
+            return 0;
+        }
+        default: return 0;
+    }
+}
+
+static const char *resolve_overload(const char *base, Node *args_node)
+{
+    int argc = (int)(args_node ? args_node->childs->size : 0);
+
+    char arg_types[MAX_OVERLOAD_PARAMS][64];
+    int  known[MAX_OVERLOAD_PARAMS];
+    for (int i = 0; i < argc && i < MAX_OVERLOAD_PARAMS; i++) {
+        known[i] = node_infer_type(&args_node->childs->data[i],
+                                    arg_types[i], 64);
+    }
+
+    OverloadEntry *candidates[MAX_OVERLOADS];
+    int cand_count = 0;
+    for (int i = 0; i < overload_count; i++) {
+        if (strcmp(overload_table[i].base_name, base) == 0 &&
+            overload_table[i].param_count == argc)
+            candidates[cand_count++] = &overload_table[i];
+    }
+
+    if (cand_count == 0) return NULL;
+    if (cand_count == 1) return candidates[0]->mangled;
+
+    for (int ci = 0; ci < cand_count; ci++) {
+        OverloadEntry *e = candidates[ci];
+        int match = 1;
+        for (int pi = 0; pi < argc && pi < MAX_OVERLOAD_PARAMS; pi++) {
+            if (!known[pi]) continue;
+            char norm_arg[64] = {0}, norm_param[64] = {0};
+            normalize_type(arg_types[pi],        norm_arg,   sizeof(norm_arg));
+            normalize_type(e->param_types[pi],   norm_param, sizeof(norm_param));
+            if (strcmp(norm_arg, norm_param) != 0) { match = 0; break; }
+        }
+        if (match) return e->mangled;
+    }
+
+    printf("Warning: overload resolution ambiguous for '%s', using '%s'\n",
+           base, candidates[0]->mangled);
+    return candidates[0]->mangled;
+}
+
+static void prescan_skip_block(vector_token *toks, int *pos) {
+    if (*pos >= (int)toks->size || strcmp(toks->data[*pos].value, "{") != 0)
+        return;
+    int depth = 1;
+    (*pos)++;
+    while (*pos < (int)toks->size && depth > 0) {
+        if      (strcmp(toks->data[*pos].value, "{") == 0) depth++;
+        else if (strcmp(toks->data[*pos].value, "}") == 0) depth--;
+        (*pos)++;
+    }
+}
+static void prescan_params(vector_token *toks, int *pos,
+                            char param_types[][64], int *param_count)
+{
+    *param_count = 0;
+    if (*pos >= (int)toks->size || strcmp(toks->data[*pos].value, "(") != 0)
+        return;
+    (*pos)++;
+
+    while (*pos < (int)toks->size && strcmp(toks->data[*pos].value, ")") != 0) {
+        Token *t = &toks->data[*pos];
+        if (t->type == TOK_TYPE || t->type == TOK_IDENT) {
+            char type_buf[64];
+            strncpy(type_buf, t->value, 63);
+            (*pos)++;
+            if (*pos < (int)toks->size && strcmp(toks->data[*pos].value, "*") == 0) {
+                strncat(type_buf, "*", 63 - strlen(type_buf));
+                (*pos)++;
+            }
+            if (*param_count < MAX_OVERLOAD_PARAMS)
+                strncpy(param_types[(*param_count)++], type_buf, 63);
+            if (*pos < (int)toks->size && toks->data[*pos].type == TOK_IDENT)
+                (*pos)++;
+        }
+        if (*pos < (int)toks->size && toks->data[*pos].type == TOK_COMMA)
+            (*pos)++;
+    }
+    if (*pos < (int)toks->size && strcmp(toks->data[*pos].value, ")") == 0)
+        (*pos)++;
+}
+
+static void prescan(vector_token *toks) {
+    int pos = 0;
+    int n   = (int)toks->size;
+
+    while (pos < n) {
+        Token *t = &toks->data[pos];
+
+        if (t->type == TOK_KEYWORD && strcmp(t->value, "func") == 0) {
+            pos++;
+            if (pos >= n) break;
+
+            char ret_type[64] = "void";
+            if (toks->data[pos].type == TOK_TYPE ||
+                toks->data[pos].type == TOK_IDENT)
+            {
+                strncpy(ret_type, toks->data[pos].value, 63);
+                pos++;
+                if (pos < n && strcmp(toks->data[pos].value, "*") == 0) {
+                    strncat(ret_type, "*", 63 - strlen(ret_type));
+                    pos++;
+                }
+            }
+
+            if (pos >= n || toks->data[pos].type != TOK_IDENT) continue;
+            char func_name[64];
+            strncpy(func_name, toks->data[pos].value, 63);
+            pos++;
+
+            char param_types[MAX_OVERLOAD_PARAMS][64];
+            int  param_count = 0;
+            prescan_params(toks, &pos, param_types, &param_count);
+
+            char mangled[128];
+            build_mangled_name(func_name,
+                               (const char (*)[64])param_types, param_count,
+                               mangled, sizeof(mangled));
+            overload_push(func_name, mangled,
+                          (const char (*)[64])param_types, param_count,
+                          ret_type);
+            printf("DEBUG prescan: func '%s' -> '%s' ret='%s'\n",
+                   func_name, mangled, ret_type);
+
+            if (pos < n && strcmp(toks->data[pos].value, "{") == 0)
+                prescan_skip_block(toks, &pos);
+            continue;
+        }
+
+        if (t->type == TOK_KEYWORD && strcmp(t->value, "class") == 0) {
+            pos++;
+            if (pos >= n || toks->data[pos].type != TOK_IDENT) continue;
+            char class_name[64];
+            strncpy(class_name, toks->data[pos].value, 63);
+            pos++;
+
+            if (pos < n && strcmp(toks->data[pos].value, "<") == 0) {
+                pos++;
+                if (pos < n) pos++;
+            }
+
+            if (pos >= n || strcmp(toks->data[pos].value, "{") != 0) continue;
+            pos++;
+
+            int depth = 1;
+            while (pos < n && depth > 0) {
+                Token *ct = &toks->data[pos];
+
+                if (ct->type == TOK_KEYWORD && strcmp(ct->value, "new") == 0) {
+                    pos++;
+                    char ctor_base[128];
+                    snprintf(ctor_base, sizeof(ctor_base), "%s_new", class_name);
+                    char self_type[68];
+                    snprintf(self_type, sizeof(self_type), "%s*", class_name);
+                    char param_types[MAX_OVERLOAD_PARAMS][64];
+                    int  param_count = 0;
+                    strncpy(param_types[param_count++], self_type, 63);
+                    char user_ptypes[MAX_OVERLOAD_PARAMS][64];
+                    int  user_pcount = 0;
+                    prescan_params(toks, &pos, user_ptypes, &user_pcount);
+                    for (int ui = 0; ui < user_pcount && param_count < MAX_OVERLOAD_PARAMS; ui++)
+                        strncpy(param_types[param_count++], user_ptypes[ui], 63);
+                    char mangled[128];
+                    build_mangled_name(ctor_base,
+                                       (const char (*)[64])param_types,
+                                       param_count, mangled, sizeof(mangled));
+                    overload_push(ctor_base, mangled,
+                                  (const char (*)[64])param_types, param_count,
+                                  "void");
+                    printf("DEBUG prescan: ctor '%s' -> '%s'\n", ctor_base, mangled);
+                    if (pos < n && strcmp(toks->data[pos].value, "{") == 0)
+                        prescan_skip_block(toks, &pos);
+                    continue;
+                }
+
+                if (ct->type == TOK_KEYWORD && strcmp(ct->value, "delete") == 0) {
+                    pos++;
+                    char dtor_base[128];
+                    snprintf(dtor_base, sizeof(dtor_base), "%s_delete", class_name);
+                    char self_type[68];
+                    snprintf(self_type, sizeof(self_type), "%s*", class_name);
+                    char param_types[MAX_OVERLOAD_PARAMS][64];
+                    int  param_count = 0;
+                    strncpy(param_types[param_count++], self_type, 63);
+                    char user_ptypes[MAX_OVERLOAD_PARAMS][64];
+                    int  user_pcount = 0;
+                    prescan_params(toks, &pos, user_ptypes, &user_pcount);
+                    for (int ui = 0; ui < user_pcount && param_count < MAX_OVERLOAD_PARAMS; ui++)
+                        strncpy(param_types[param_count++], user_ptypes[ui], 63);
+                    char mangled[128];
+                    build_mangled_name(dtor_base,
+                                       (const char (*)[64])param_types,
+                                       param_count, mangled, sizeof(mangled));
+                    overload_push(dtor_base, mangled,
+                                  (const char (*)[64])param_types, param_count,
+                                  "void");
+                    printf("DEBUG prescan: dtor '%s' -> '%s'\n", dtor_base, mangled);
+                    if (pos < n && strcmp(toks->data[pos].value, "{") == 0)
+                        prescan_skip_block(toks, &pos);
+                    continue;
+                }
+
+                int is_static_method = 0;
+                if (ct->type == TOK_KEYWORD && strcmp(ct->value, "static") == 0) {
+                    is_static_method = 1;
+                    pos++;
+                    if (pos >= n) break;
+                    ct = &toks->data[pos];
+                }
+                if (ct->type == TOK_KEYWORD && strcmp(ct->value, "func") == 0) {
+                    pos++;
+                    if (pos >= n) break;
+
+                    char ret_type[64] = "void";
+                    if (toks->data[pos].type == TOK_TYPE ||
+                        toks->data[pos].type == TOK_IDENT) {
+                        strncpy(ret_type, toks->data[pos].value, 63);
+                        pos++;
+                        if (pos < n && strcmp(toks->data[pos].value, "*") == 0) {
+                            strncat(ret_type, "*", 63 - strlen(ret_type));
+                            pos++;
+                        }
+                    }
+
+                    if (pos >= n || toks->data[pos].type != TOK_IDENT) continue;
+                    char mname[64];
+                    strncpy(mname, toks->data[pos].value, 63);
+                    pos++;
+
+                    char base_method[128];
+                    snprintf(base_method, sizeof(base_method), "%s_%s",
+                             class_name, mname);
+
+                    char param_types[MAX_OVERLOAD_PARAMS][64];
+                    int  param_count = 0;
+                    if (!is_static_method) {
+                        char self_type[68];
+                        snprintf(self_type, sizeof(self_type), "%s*", class_name);
+                        strncpy(param_types[param_count++], self_type, 63);
+                    }
+                    char user_ptypes[MAX_OVERLOAD_PARAMS][64];
+                    int  user_pcount = 0;
+                    prescan_params(toks, &pos, user_ptypes, &user_pcount);
+                    for (int ui = 0; ui < user_pcount && param_count < MAX_OVERLOAD_PARAMS; ui++)
+                        strncpy(param_types[param_count++], user_ptypes[ui], 63);
+
+                    char mangled[128];
+                    build_mangled_name(base_method,
+                                       (const char (*)[64])param_types,
+                                       param_count, mangled, sizeof(mangled));
+                    overload_push(base_method, mangled,
+                                  (const char (*)[64])param_types, param_count,
+                                  ret_type);
+                    printf("DEBUG prescan: method '%s' -> '%s' ret='%s'\n",
+                           base_method, mangled, ret_type);
+
+                    if (pos < n && strcmp(toks->data[pos].value, "{") == 0)
+                        prescan_skip_block(toks, &pos);
+                    continue;
+                }
+
+                if (strcmp(toks->data[pos].value, "{") == 0) depth++;
+                else if (strcmp(toks->data[pos].value, "}") == 0) { depth--; }
+                pos++;
+            }
+            continue;
+        }
+
+        pos++;
+    }
+}
+
 static char known_classes[64][64];
 static int  known_class_count = 0;
 
@@ -541,6 +915,9 @@ vector_node *parse(int it, vector_token* tokenss) {
     tokens = tokenss;
     var_type_count   = 0;
     known_class_count = 0;
+    overload_count   = 0;
+
+    prescan(tokenss);
     
     vector_node *nodes = malloc(sizeof(vector_node));
     vn_init(nodes, 4);
@@ -570,7 +947,7 @@ Node parseAssign(Token t) {
         vn_push_back(assign.childs, *ident);
         free(ident);
         
-        advance(); // [
+        advance();
         Node *idx = parseExpr();
         if (idx) {
             vn_push_back(assign.childs, *idx);
@@ -686,9 +1063,9 @@ static Node parseFuncCallInner(Token t, int is_stmt) {
     call.str = malloc(strlen(t.value) + 1);
     strcpy(call.str, t.value);
 
-    Node *name = make_node(NODE_IDENT, t.value);
-    vn_push_back(call.childs, *name);
-    free(name);
+    Node *name_node = make_node(NODE_IDENT, t.value);
+    vn_push_back(call.childs, *name_node);
+    free(name_node);
 
     Node *args = make_node(NODE_ARGS, "");
     if (strcmp(peek(0).value, "(") == 0) {
@@ -710,6 +1087,19 @@ static Node parseFuncCallInner(Token t, int is_stmt) {
     }
     vn_push_back(call.childs, *args);
     free(args);
+    {
+        Node *args_in_call = &call.childs->data[1];
+        const char *resolved = resolve_overload(t.value, args_in_call);
+        if (resolved) {
+            free(call.str);
+            call.str = malloc(strlen(resolved) + 1);
+            strcpy(call.str, resolved);
+            free(call.childs->data[0].str);
+            call.childs->data[0].str = malloc(strlen(resolved) + 1);
+            strcpy(call.childs->data[0].str, resolved);
+            printf("DEBUG funcall: resolved '%s' -> '%s'\n", t.value, resolved);
+        }
+    }
 
     if (is_stmt && peek(0).type == TOK_SEMICOLON) advance();
 
@@ -975,6 +1365,43 @@ Node parseFuncDef(void) {
     } else {
         printf("Error: expected '(' in function def\n");
         err();
+    }
+    {
+        Node *name_node   = &func.childs->data[1];
+        Node *params_node = &func.childs->data[2];
+
+        const char *base = name_node->str;
+
+        char param_types[MAX_OVERLOAD_PARAMS][64];
+        int  param_count = 0;
+
+        if (params_node->type == NODE_PARAMS) {
+            for (unsigned long long pi = 0;
+                 pi < params_node->childs->size && param_count < MAX_OVERLOAD_PARAMS;
+                 pi++)
+            {
+                Node *param = &params_node->childs->data[pi];
+                if (param->childs && param->childs->size >= 1)
+                    strncpy(param_types[param_count++],
+                            param->childs->data[0].str, 63);
+            }
+        }
+
+        char mangled[128];
+        build_mangled_name(base, (const char (*)[64])param_types,
+                           param_count, mangled, sizeof(mangled));
+
+        const char *ret_type_str = func.childs->data[0].str;
+        overload_push(base, mangled,
+                      (const char (*)[64])param_types, param_count,
+                      ret_type_str);
+
+        free(name_node->str);
+        name_node->str = malloc(strlen(mangled) + 1);
+        strcpy(name_node->str, mangled);
+
+        printf("DEBUG parser: func '%s' -> mangled '%s' (%d params)\n",
+               base, mangled, param_count);
     }
 
     current = advance();
@@ -1271,6 +1698,26 @@ Node parseClass(void) {
     strcpy(cls.str, name.value);
     class_push(name.value);
 
+    char parent_name[64] = "";
+    if (peek(0).type == TOK_OP && strcmp(peek(0).value, "<") == 0) {
+        advance();
+        Token parent = advance();
+        if (parent.type != TOK_IDENT) {
+            printf("Error: expected parent class name\n");
+            err();
+            cls.type = NODE_ERROR;
+            return cls;
+        }
+        strncpy(parent_name, parent.value, 63);
+    }
+    if (parent_name[0] != '\0') {
+        char full_name[128];
+        snprintf(full_name, sizeof(full_name), "%s<%s", name.value, parent_name);
+        free(cls.str);
+        cls.str = malloc(strlen(full_name) + 1);
+        strcpy(cls.str, full_name);
+    }
+
     Token brace = advance();
     if (strcmp(brace.value, "{") != 0) {
         printf("Error: expected '{' after class name\n");
@@ -1316,11 +1763,41 @@ Node parseClass(void) {
             }
 
             Node *method_name_node = &method.childs->data[1];
-            char new_name[128];
-            snprintf(new_name, sizeof(new_name), "%s_%s", name.value, method_name_node->str);
+            Node *method_params    = &method.childs->data[2];
+
+            char base_method[128];
+            snprintf(base_method, sizeof(base_method), "%s_%s",
+                     name.value, method_name_node->str);
+
+            char param_types[MAX_OVERLOAD_PARAMS][64];
+            int  param_count = 0;
+            if (method_params->type == NODE_PARAMS) {
+                for (unsigned long long pi = 0;
+                     pi < method_params->childs->size && param_count < MAX_OVERLOAD_PARAMS;
+                     pi++)
+                {
+                    Node *param = &method_params->childs->data[pi];
+                    if (param->childs && param->childs->size >= 1)
+                        strncpy(param_types[param_count++],
+                                param->childs->data[0].str, 63);
+                }
+            }
+
+            char mangled_method[128];
+            build_mangled_name(base_method,
+                               (const char (*)[64])param_types, param_count,
+                               mangled_method, sizeof(mangled_method));
+
+            overload_push(base_method, mangled_method,
+                          (const char (*)[64])param_types, param_count,
+                          method.childs->data[0].str);
+
             free(method_name_node->str);
-            method_name_node->str = malloc(strlen(new_name) + 1);
-            strcpy(method_name_node->str, new_name);
+            method_name_node->str = malloc(strlen(mangled_method) + 1);
+            strcpy(method_name_node->str, mangled_method);
+
+            printf("DEBUG parser: method '%s' -> mangled '%s'\n",
+                   base_method, mangled_method);
 
             if (!is_static) {
                 Node *params_node = &method.childs->data[2];
