@@ -26,29 +26,44 @@ static int parse_pattern(Token *toks, int len, PatternToken *out) {
         if (t->type == TOK_OP && strcmp(t->value, "%") == 0) {
             i++;
             if (i >= len) break;
-            Token *next = &toks[i];
-
-            if (strcmp(next->value, "i") == 0) {
-                out[out_len++] = (PatternToken){ PAT_IDENT, "" };
-            } else if (strcmp(next->value, "k") == 0) {
-                out[out_len++] = (PatternToken){ PAT_KEYWORD, "" };
-            } else if (strcmp(next->value, "n") == 0) {
-                out[out_len++] = (PatternToken){ PAT_NUMBER, "" };
-            } else if (strcmp(next->value, "s") == 0) {
-                out[out_len++] = (PatternToken){ PAT_STRING, "" };
-            } else if (strcmp(next->value, ":") == 0) {
-                i++;
-                if (i >= len) break;
+            Token *spec = &toks[i];
+            if (i + 2 < len &&
+                strcmp(toks[i + 1].value, ":") == 0)
+            {
                 PatternToken pt;
                 pt.kind = PAT_CAPTURE;
-                strncpy(pt.value, toks[i].value, 63);
+                strncpy(pt.value, toks[i + 2].value, 63);
+
+                if (strcmp(spec->value, "n") == 0)
+                    pt.capture_type = PAT_NUMBER;
+                else if (strcmp(spec->value, "i") == 0)
+                    pt.capture_type = PAT_IDENT;
+                else if (strcmp(spec->value, "k") == 0)
+                    pt.capture_type = PAT_KEYWORD;
+                else if (strcmp(spec->value, "s") == 0)
+                    pt.capture_type = PAT_STRING;
+                else {
+                    printf("Warning: unknown capture type specifier '%%%s'\n", spec->value);
+                    pt.capture_type = PAT_IDENT;
+                }
+
                 out[out_len++] = pt;
+                i += 2;
             } else {
-                printf("Warning: unknown pattern specifier '%%%s'\n", next->value);
-            }
+                if (strcmp(spec->value, "i") == 0)
+                    out[out_len++] = (PatternToken){ PAT_IDENT, "", PAT_IDENT };
+                else if (strcmp(spec->value, "k") == 0)
+                    out[out_len++] = (PatternToken){ PAT_KEYWORD, "", PAT_KEYWORD };
+                else if (strcmp(spec->value, "n") == 0)
+                    out[out_len++] = (PatternToken){ PAT_NUMBER, "", PAT_NUMBER };
+                else if (strcmp(spec->value, "s") == 0)
+                    out[out_len++] = (PatternToken){ PAT_STRING, "", PAT_STRING };
+                else
+                    printf("Warning: unknown pattern specifier '%%%s'\n", spec->value); }
         } else {
             PatternToken pt;
             pt.kind = PAT_LITERAL;
+            pt.capture_type = PAT_LITERAL;
             strncpy(pt.value, t->value, 63);
             out[out_len++] = pt;
         }
@@ -217,10 +232,31 @@ static int try_match(vector_token *tokens, int pos, Exception *ex,
             case PAT_STRING:
                 if (t->type != TOK_STRING) return -1;
                 break;
-            case PAT_CAPTURE:
+            case PAT_CAPTURE: {
+                /* Проверяем тип токена согласно capture_type */
+                int type_ok = 1;
+                switch (pt->capture_type) {
+                    case PAT_NUMBER:
+                        type_ok = (t->type == TOK_INT || t->type == TOK_FLOAT);
+                        break;
+                    case PAT_IDENT:
+                        type_ok = (t->type == TOK_IDENT);
+                        break;
+                    case PAT_KEYWORD:
+                        type_ok = (t->type == TOK_KEYWORD);
+                        break;
+                    case PAT_STRING:
+                        type_ok = (t->type == TOK_STRING);
+                        break;
+                    default:
+                        type_ok = 1; /* PAT_LITERAL как fallback — любой токен */
+                        break;
+                }
+                if (!type_ok) return -1;
                 strncpy(captures[pi], t->value, 63);
                 capture_types[pi] = t->type;
                 break;
+            }
         }
         ti++;
     }
