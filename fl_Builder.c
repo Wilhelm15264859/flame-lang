@@ -1219,6 +1219,11 @@ static LLVMValueRef codegen_delete(Node *n) {
     LLVMTypeRef  free_type = LLVMGlobalGetValueType(free_fn);
     LLVMBuildCall2(builder, free_type, free_fn, &ptr, 1, "");
 
+    /* Обнуляем указатель: a = null */
+    LLVMBuildStore(builder,
+        LLVMConstNull(LLVMPointerTypeInContext(ctx, 0)),
+        s->value);
+
     return NULL;
 }
 

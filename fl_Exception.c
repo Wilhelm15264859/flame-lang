@@ -18,6 +18,14 @@ static int find_closing_brace(vector_token *tokens, int start) {
     return -1;
 }
 
+static PatternTokenType spec_to_pat(const char *s) {
+    if (strcmp(s, "n") == 0) return PAT_NUMBER;
+    if (strcmp(s, "i") == 0) return PAT_IDENT;
+    if (strcmp(s, "k") == 0) return PAT_KEYWORD;
+    if (strcmp(s, "s") == 0) return PAT_STRING;
+    return PAT_LITERAL;
+}
+
 static int parse_pattern(Token *toks, int len, PatternToken *out) {
     int out_len = 0;
     for (int i = 0; i < len && out_len < MAX_PATTERN_TOKENS; i++) {
@@ -27,42 +35,111 @@ static int parse_pattern(Token *toks, int len, PatternToken *out) {
             i++;
             if (i >= len) break;
             Token *spec = &toks[i];
-            if (i + 2 < len &&
-                strcmp(toks[i + 1].value, ":") == 0)
-            {
-                PatternToken pt;
-                pt.kind = PAT_CAPTURE;
-                strncpy(pt.value, toks[i + 2].value, 63);
 
-                if (strcmp(spec->value, "n") == 0)
-                    pt.capture_type = PAT_NUMBER;
-                else if (strcmp(spec->value, "i") == 0)
-                    pt.capture_type = PAT_IDENT;
-                else if (strcmp(spec->value, "k") == 0)
-                    pt.capture_type = PAT_KEYWORD;
-                else if (strcmp(spec->value, "s") == 0)
-                    pt.capture_type = PAT_STRING;
-                else {
-                    printf("Warning: unknown capture type specifier '%%%s'\n", spec->value);
-                    pt.capture_type = PAT_IDENT;
+            PatternTokenType left_type;
+            char             left_val[64] = "";
+            int              left_is_str  = 0;
+
+            if (spec->type == TOK_STRING) {
+                left_is_str = 1;
+                left_type   = PAT_LITERAL;
+                strncpy(left_val, spec->value, 63);
+            } else {
+                left_type = spec_to_pat(spec->value);
+                if (left_type == PAT_LITERAL && strcmp(spec->value, "n") != 0 &&
+                    strcmp(spec->value, "i") != 0 && strcmp(spec->value, "k") != 0 &&
+                    strcmp(spec->value, "s") != 0) {
+                    printf("Warning: unknown pattern specifier '%%%s'\n", spec->value);
+                }
+            }
+
+            int has_caret  = (i + 1 < len && strcmp(toks[i + 1].value, "^") == 0);
+            int has_colon  = (i + 1 < len && strcmp(toks[i + 1].value, ":") == 0);
+
+            if (has_caret) {
+                i += 2;
+                if (i >= len) break;
+                Token *until_spec = &toks[i];
+
+                PatternTokenType until_type;
+                char             until_val[64] = "";
+
+                if (until_spec->type == TOK_STRING) {
+                    until_type = PAT_LITERAL;
+                    strncpy(until_val, until_spec->value, 63);
+                } else {
+                    until_type = spec_to_pat(until_spec->value);
                 }
 
-                out[out_len++] = pt;
+                PatternTokenType stop_type  = PAT_LITERAL;
+                char             stop_val[64] = "";
+                int              has_stop   = 0;
+
+                if (i + 1 < len && strcmp(toks[i + 1].value, "!") == 0) {
+                    i += 2;
+                    if (i >= len) break;
+                    Token *stop_spec = &toks[i];
+                    has_stop = 1;
+                    if (stop_spec->type == TOK_STRING) {
+                        stop_type = PAT_LITERAL;
+                        strncpy(stop_val, stop_spec->value, 63);
+                    } else {
+                        stop_type = spec_to_pat(stop_spec->value);
+                    }
+                }
+
+                if (i + 2 < len && strcmp(toks[i + 1].value, ":") == 0) {
+                    i += 2;
+                    PatternToken pt;
+                    memset(&pt, 0, sizeof(pt));
+                    pt.kind         = PAT_CAPTURE_UNTIL;
+                    pt.capture_type = left_type;
+                    pt.until_type   = until_type;
+                    pt.has_stop     = has_stop;
+                    pt.stop_type    = stop_type;
+                    strncpy(pt.value,       toks[i].value, 63);
+                    strncpy(pt.until_value, until_val,     63);
+                    strncpy(pt.stop_value,  stop_val,      63);
+
+                    if (left_is_str) {
+                        pt.capture_type = PAT_LITERAL;
+                        PatternToken lit;
+                        memset(&lit, 0, sizeof(lit));
+                        lit.kind         = PAT_LITERAL;
+                        lit.capture_type = PAT_LITERAL;
+                        strncpy(lit.value, left_val, 63);
+                        out[out_len++] = lit;
+                    }
+                    out[out_len++] = pt;
+                } else {
+                    printf("Warning: expected ':varName' after '^' in pattern\n");
+                }
+            } else if (has_colon && !left_is_str) {
                 i += 2;
+                PatternToken pt;
+                memset(&pt, 0, sizeof(pt));
+                pt.kind         = PAT_CAPTURE;
+                pt.capture_type = left_type;
+                strncpy(pt.value, toks[i].value, 63);
+                out[out_len++] = pt;
+            } else if (left_is_str) {
+                PatternToken pt;
+                memset(&pt, 0, sizeof(pt));
+                pt.kind         = PAT_LITERAL;
+                pt.capture_type = PAT_LITERAL;
+                strncpy(pt.value, left_val, 63);
+                out[out_len++] = pt;
             } else {
-                if (strcmp(spec->value, "i") == 0)
-                    out[out_len++] = (PatternToken){ PAT_IDENT, "", PAT_IDENT };
-                else if (strcmp(spec->value, "k") == 0)
-                    out[out_len++] = (PatternToken){ PAT_KEYWORD, "", PAT_KEYWORD };
-                else if (strcmp(spec->value, "n") == 0)
-                    out[out_len++] = (PatternToken){ PAT_NUMBER, "", PAT_NUMBER };
-                else if (strcmp(spec->value, "s") == 0)
-                    out[out_len++] = (PatternToken){ PAT_STRING, "", PAT_STRING };
-                else
-                    printf("Warning: unknown pattern specifier '%%%s'\n", spec->value); }
+                PatternToken pt;
+                memset(&pt, 0, sizeof(pt));
+                pt.kind         = left_type;
+                pt.capture_type = left_type;
+                out[out_len++] = pt;
+            }
         } else {
             PatternToken pt;
-            pt.kind = PAT_LITERAL;
+            memset(&pt, 0, sizeof(pt));
+            pt.kind         = PAT_LITERAL;
             pt.capture_type = PAT_LITERAL;
             strncpy(pt.value, t->value, 63);
             out[out_len++] = pt;
@@ -232,8 +309,61 @@ static int try_match(vector_token *tokens, int pos, Exception *ex,
             case PAT_STRING:
                 if (t->type != TOK_STRING) return -1;
                 break;
+            case PAT_CAPTURE_UNTIL: {
+                if (pt->capture_type == PAT_NUMBER &&
+                    t->type != TOK_INT && t->type != TOK_FLOAT) return -1;
+                if (pt->capture_type == PAT_IDENT   && t->type != TOK_IDENT)   return -1;
+                if (pt->capture_type == PAT_KEYWORD  && t->type != TOK_KEYWORD) return -1;
+                if (pt->capture_type == PAT_STRING   && t->type != TOK_STRING)  return -1;
+
+                char buf[512] = "";
+                int  found    = 0;
+                while ((unsigned)ti < tokens->size) {
+                    Token *cur = &tokens->data[ti];
+
+                    int is_until = 0;
+                    if (pt->until_type == PAT_LITERAL) {
+                        is_until = (strcmp(cur->value, pt->until_value) == 0);
+                    } else if (pt->until_type == PAT_NUMBER) {
+                        is_until = (cur->type == TOK_INT || cur->type == TOK_FLOAT);
+                    } else if (pt->until_type == PAT_IDENT) {
+                        is_until = (cur->type == TOK_IDENT);
+                    } else if (pt->until_type == PAT_KEYWORD) {
+                        is_until = (cur->type == TOK_KEYWORD);
+                    } else if (pt->until_type == PAT_STRING) {
+                        is_until = (cur->type == TOK_STRING);
+                    }
+
+                    if (is_until) { found = 1; break; }
+
+                    if (pt->has_stop) {
+                        int is_stop = 0;
+                        if (pt->stop_type == PAT_LITERAL) {
+                            is_stop = (strcmp(cur->value, pt->stop_value) == 0);
+                        } else if (pt->stop_type == PAT_NUMBER) {
+                            is_stop = (cur->type == TOK_INT || cur->type == TOK_FLOAT);
+                        } else if (pt->stop_type == PAT_IDENT) {
+                            is_stop = (cur->type == TOK_IDENT);
+                        } else if (pt->stop_type == PAT_KEYWORD) {
+                            is_stop = (cur->type == TOK_KEYWORD);
+                        } else if (pt->stop_type == PAT_STRING) {
+                            is_stop = (cur->type == TOK_STRING);
+                        }
+                        if (is_stop) { found = 1; break; }
+                    }
+
+                    if (buf[0] != '\0')
+                        strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
+                    strncat(buf, cur->value, sizeof(buf) - strlen(buf) - 1);
+                    ti++;
+                }
+                if (!found) return -1;
+
+                strncpy(captures[pi], buf, 63);
+                capture_types[pi] = TOK_IDENT;
+                continue;
+            }
             case PAT_CAPTURE: {
-                /* Проверяем тип токена согласно capture_type */
                 int type_ok = 1;
                 switch (pt->capture_type) {
                     case PAT_NUMBER:
@@ -249,7 +379,7 @@ static int try_match(vector_token *tokens, int pos, Exception *ex,
                         type_ok = (t->type == TOK_STRING);
                         break;
                     default:
-                        type_ok = 1; /* PAT_LITERAL как fallback — любой токен */
+                        type_ok = 1;
                         break;
                 }
                 if (!type_ok) return -1;

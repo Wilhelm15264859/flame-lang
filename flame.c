@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <libgen.h>
 
-const char* version = "0.1.1-BETA";
+const char* version = "1.2.0-STABLE";
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
