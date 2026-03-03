@@ -14,22 +14,6 @@
 
 static int get_field_index(LLVMTypeRef struct_type, const char *field_name);
 
-static LLVMValueRef find_func_by_prefix(const char *base_name) {
-    LLVMValueRef f = LLVMGetNamedFunction(mod, base_name);
-    if (f) return f;
-
-    char prefix[132];
-    snprintf(prefix, sizeof(prefix), "_%s_", base_name);
-    int plen = (int)strlen(prefix);
-
-    for (LLVMValueRef fn = LLVMGetFirstFunction(mod); fn; fn = LLVMGetNextFunction(fn)) {
-        const char *fn_name = LLVMGetValueName(fn);
-        if (strncmp(fn_name, prefix, plen) == 0)
-            return fn;
-    }
-    return NULL;
-}
-
 typedef struct {
     char        name[64];
     LLVMTypeRef type;
@@ -75,28 +59,6 @@ static StructInfo* find_struct_info_by_name(const char *name) {
     return NULL;
 }
 
-static int collect_all_fields(const char *class_name,
-                               char all_fields[64][64],
-                               LLVMTypeRef all_field_types[64])
-{
-    StructInfo *info = find_struct_info_by_name(class_name);
-    if (!info) return 0;
-
-    int total_count = 0;
-
-    if (info->parent_name[0] != '\0') {
-        total_count = collect_all_fields(info->parent_name, all_fields, all_field_types);
-    }
-
-    for (int i = 0; i < info->field_count && total_count < 64; i++) {
-        strncpy(all_fields[total_count], info->field_names[i], 63);
-        all_field_types[total_count] = info->field_types[i];
-        total_count++;
-    }
-
-    return total_count;
-}
-
 static LLVMTypeRef type_lookup(const char *name) {
     for (int j = type_count - 1; j >= 0; j--)
         if (strcmp(type_table[j].name, name) == 0)
@@ -140,6 +102,28 @@ static void sym_restore(int cp) { sym_count = cp; }
 static LLVMContextRef ctx;
 static LLVMModuleRef  mod;
 static LLVMBuilderRef builder;
+
+/*
+ * Ищет функцию в модуле по точному имени.
+ * Если не нашёл — ищет первую функцию с именем "_<prefix>_",
+ * что покрывает мэнглированные имена ctor/dtor без знания точных типов.
+ * Например: "MyClass_new" -> ищет "_MyClass_new_..."
+ */
+static LLVMValueRef find_func_by_prefix(const char *base_name) {
+    LLVMValueRef f = LLVMGetNamedFunction(mod, base_name);
+    if (f) return f;
+
+    char prefix[132];
+    snprintf(prefix, sizeof(prefix), "_%s_", base_name);
+    int plen = (int)strlen(prefix);
+
+    for (LLVMValueRef fn = LLVMGetFirstFunction(mod); fn; fn = LLVMGetNextFunction(fn)) {
+        const char *fn_name = LLVMGetValueName(fn);
+        if (strncmp(fn_name, prefix, plen) == 0)
+            return fn;
+    }
+    return NULL;
+}
 
 static LLVMTypeRef llvm_type_from_str(const char *s) {
     int len = strlen(s);
@@ -400,6 +384,7 @@ static LLVMValueRef codegen_func_call(Node *n) {
         func  = s->value;
         ftype = s->type;
     } else {
+        /* Сначала точный поиск, потом по префиксу (мэнглинг) */
         func = LLVMGetNamedFunction(mod, fname);
         if (!func)
             func = find_func_by_prefix(fname);
@@ -587,6 +572,7 @@ static LLVMValueRef codegen_func_def(Node *n) {
                 char base[64];
                 strncpy(base, ptype_str, plen - 1);
                 base[plen - 1] = '\0';
+                /* type_lookup ищет только struct'ы, для int/char/etc нужен llvm_type_from_str */
                 elem_type = llvm_type_from_str(base);
             }
 
@@ -672,7 +658,7 @@ static LLVMValueRef codegen_struct_def(Node *n) {
     char class_name[64] = "";
     char parent_name[64] = "";
     
-    char *delim = strchr(full_name, '<');
+    const char *delim = strchr(full_name, '<');
     if (delim) {
         int len = delim - full_name;
         strncpy(class_name, full_name, len);

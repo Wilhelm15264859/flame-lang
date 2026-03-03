@@ -1,6 +1,7 @@
 #include "fl_Parser.h"
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 static int i;
 static vector_token *tokens;
@@ -23,24 +24,31 @@ static const char *var_type_lookup(const char *var) {
     return NULL;
 }
 
+/* -----------------------------------------------------------------------
+ * Таблица перегрузок функций.
+ * Для каждого базового имени хранится список мэнглированных вариантов
+ * с типами параметров, чтобы при вызове подобрать нужный.
+ * ----------------------------------------------------------------------- */
 #define MAX_OVERLOADS      256
 #define MAX_OVERLOAD_PARAMS 16
 
 typedef struct {
-    char base_name[64];
-    char mangled[128];
-    char param_types[MAX_OVERLOAD_PARAMS][64];
+    char base_name[64];      /* исходное имя: "a"            */
+    char mangled[128];       /* мэнглированное: "_a_intint"  */
+    char param_types[MAX_OVERLOAD_PARAMS][64]; /* типы параметров */
     int  param_count;
-    char ret_type[64];
+    char ret_type[64];       /* возвращаемый тип: "int", "void", "MyClass*" */
 } OverloadEntry;
 
 static OverloadEntry overload_table[MAX_OVERLOADS];
 static int           overload_count = 0;
 
+/* Регистрирует перегрузку. */
 static void overload_push(const char *base, const char *mangled,
                            const char param_types[][64], int param_count,
                            const char *ret_type)
 {
+    /* Обновляем если уже есть (двойная регистрация из prescan + parseFuncDef) */
     for (int i = 0; i < overload_count; i++) {
         if (strcmp(overload_table[i].mangled, mangled) == 0) return;
     }
@@ -58,6 +66,12 @@ static void overload_push(const char *base, const char *mangled,
         strncpy(e->param_types[i], param_types[i], 63);
 }
 
+/*
+ * Строит мэнглированное имя функции:
+ *   base="_" + name + "_" + type0 + type1 + ...
+ * Типы нормализуются: пробелы и '*' убираются, всё в нижнем регистре.
+ * Например: "a", {"int","int"} -> "_a_intint"
+ */
 static void build_mangled_name(const char *base,
                                 const char param_types[][64], int param_count,
                                 char *out, int out_size)
@@ -79,6 +93,7 @@ static void build_mangled_name(const char *base,
     out[pos] = '\0';
 }
 
+/* Нормализует строку типа в буфер: убирает autodel:, *, пробелы, lowercase */
 static void normalize_type(const char *src, char *out, int out_size) {
     if (strncmp(src, "autodel:", 8) == 0) src += 8;
     int j = 0;
@@ -88,6 +103,10 @@ static void normalize_type(const char *src, char *out, int out_size) {
     out[j] = '\0';
 }
 
+/*
+ * Выводит тип AST-узла аргумента в виде строки.
+ * Возвращает 1 если тип известен, 0 если нет.
+ */
 static int node_infer_type(Node *n, char *out, int out_size) {
     if (!n) return 0;
     switch (n->type) {
@@ -105,19 +124,23 @@ static int node_infer_type(Node *n, char *out, int out_size) {
             return 0;
         }
         case NODE_FUNC_CALL: {
+            /* Ищем возвращаемый тип по мэнглированному имени вызова */
             for (int i = 0; i < overload_count; i++) {
                 if (strcmp(overload_table[i].mangled, n->str) == 0) {
                     strncpy(out, overload_table[i].ret_type, out_size - 1);
                     return 1;
                 }
             }
+            /* Если имя не мэнглировано (extern C) — тип неизвестен */
             return 0;
         }
         case NODE_MEMBER_DOT:
         case NODE_MEMBER_ARROW: {
+            /* obj.field или obj->field — тип поля неизвестен без полного анализа */
             return 0;
         }
         case NODE_BINOP: {
+            /* Тип бинарной операции — берём тип левого операнда */
             if (n->childs && n->childs->size >= 1)
                 return node_infer_type(&n->childs->data[0], out, out_size);
             return 0;
@@ -126,6 +149,12 @@ static int node_infer_type(Node *n, char *out, int out_size) {
     }
 }
 
+/*
+ * Ищет перегрузку по базовому имени и типам аргументов.
+ * Если типы аргументов известны — ищет точное совпадение.
+ * Если типы частично неизвестны — ищет единственную перегрузку с нужным числом параметров.
+ * Возвращает мэнглированное имя или NULL.
+ */
 static const char *resolve_overload(const char *base, Node *args_node)
 {
     int argc = (int)(args_node ? args_node->childs->size : 0);
@@ -148,6 +177,7 @@ static const char *resolve_overload(const char *base, Node *args_node)
     if (cand_count == 0) return NULL;
     if (cand_count == 1) return candidates[0]->mangled;
 
+    /* Точное совпадение по известным типам */
     for (int ci = 0; ci < cand_count; ci++) {
         OverloadEntry *e = candidates[ci];
         int match = 1;
@@ -166,6 +196,13 @@ static const char *resolve_overload(const char *base, Node *args_node)
     return candidates[0]->mangled;
 }
 
+/* -----------------------------------------------------------------------
+ * Prescan — первый проход по токенам.
+ * Собирает все объявления func/class без парсинга тел,
+ * регистрирует их в overload_table до основного прохода.
+ * ----------------------------------------------------------------------- */
+
+/* Пропускает сбалансированный блок { ... } начиная с позиции *pos (на '{') */
 static void prescan_skip_block(vector_token *toks, int *pos) {
     if (*pos >= (int)toks->size || strcmp(toks->data[*pos].value, "{") != 0)
         return;
@@ -177,13 +214,16 @@ static void prescan_skip_block(vector_token *toks, int *pos) {
         (*pos)++;
     }
 }
+
+/* Разбирает список параметров "(type name, type name, ...)" начиная с '('.
+ * Заполняет param_types и param_count. Оставляет *pos на ')' или после него. */
 static void prescan_params(vector_token *toks, int *pos,
                             char param_types[][64], int *param_count)
 {
     *param_count = 0;
     if (*pos >= (int)toks->size || strcmp(toks->data[*pos].value, "(") != 0)
         return;
-    (*pos)++;
+    (*pos)++; /* skip '(' */
 
     while (*pos < (int)toks->size && strcmp(toks->data[*pos].value, ")") != 0) {
         Token *t = &toks->data[*pos];
@@ -191,20 +231,23 @@ static void prescan_params(vector_token *toks, int *pos,
             char type_buf[64];
             strncpy(type_buf, t->value, 63);
             (*pos)++;
+            /* указатель? */
             if (*pos < (int)toks->size && strcmp(toks->data[*pos].value, "*") == 0) {
                 strncat(type_buf, "*", 63 - strlen(type_buf));
                 (*pos)++;
             }
             if (*param_count < MAX_OVERLOAD_PARAMS)
                 strncpy(param_types[(*param_count)++], type_buf, 63);
+            /* пропускаем имя параметра */
             if (*pos < (int)toks->size && toks->data[*pos].type == TOK_IDENT)
                 (*pos)++;
         }
+        /* запятая */
         if (*pos < (int)toks->size && toks->data[*pos].type == TOK_COMMA)
             (*pos)++;
     }
     if (*pos < (int)toks->size && strcmp(toks->data[*pos].value, ")") == 0)
-        (*pos)++;
+        (*pos)++; /* skip ')' */
 }
 
 static void prescan(vector_token *toks) {
@@ -214,10 +257,12 @@ static void prescan(vector_token *toks) {
     while (pos < n) {
         Token *t = &toks->data[pos];
 
+        /* func <rettype>[*] <name> ( params ) { body } */
         if (t->type == TOK_KEYWORD && strcmp(t->value, "func") == 0) {
             pos++;
             if (pos >= n) break;
 
+            /* возвращаемый тип */
             char ret_type[64] = "void";
             if (toks->data[pos].type == TOK_TYPE ||
                 toks->data[pos].type == TOK_IDENT)
@@ -230,15 +275,18 @@ static void prescan(vector_token *toks) {
                 }
             }
 
+            /* имя функции */
             if (pos >= n || toks->data[pos].type != TOK_IDENT) continue;
             char func_name[64];
             strncpy(func_name, toks->data[pos].value, 63);
             pos++;
 
+            /* параметры */
             char param_types[MAX_OVERLOAD_PARAMS][64];
             int  param_count = 0;
             prescan_params(toks, &pos, param_types, &param_count);
 
+            /* мэнглинг и регистрация */
             char mangled[128];
             build_mangled_name(func_name,
                                (const char (*)[64])param_types, param_count,
@@ -249,11 +297,13 @@ static void prescan(vector_token *toks) {
             printf("DEBUG prescan: func '%s' -> '%s' ret='%s'\n",
                    func_name, mangled, ret_type);
 
+            /* пропускаем тело */
             if (pos < n && strcmp(toks->data[pos].value, "{") == 0)
                 prescan_skip_block(toks, &pos);
             continue;
         }
 
+        /* class <name> [< parent] { ... func ... } */
         if (t->type == TOK_KEYWORD && strcmp(t->value, "class") == 0) {
             pos++;
             if (pos >= n || toks->data[pos].type != TOK_IDENT) continue;
@@ -261,27 +311,32 @@ static void prescan(vector_token *toks) {
             strncpy(class_name, toks->data[pos].value, 63);
             pos++;
 
+            /* наследование < Parent */
             if (pos < n && strcmp(toks->data[pos].value, "<") == 0) {
-                pos++;
-                if (pos < n) pos++;
+                pos++; /* skip '<' */
+                if (pos < n) pos++; /* skip parent name */
             }
 
+            /* тело класса */
             if (pos >= n || strcmp(toks->data[pos].value, "{") != 0) continue;
-            pos++;
+            pos++; /* skip '{' */
 
             int depth = 1;
             while (pos < n && depth > 0) {
                 Token *ct = &toks->data[pos];
 
+                /* new ( params ) { body } */
                 if (ct->type == TOK_KEYWORD && strcmp(ct->value, "new") == 0) {
                     pos++;
                     char ctor_base[128];
                     snprintf(ctor_base, sizeof(ctor_base), "%s_new", class_name);
+                    /* self параметр не в исходнике, добавим вручную */
                     char self_type[68];
                     snprintf(self_type, sizeof(self_type), "%s*", class_name);
                     char param_types[MAX_OVERLOAD_PARAMS][64];
                     int  param_count = 0;
                     strncpy(param_types[param_count++], self_type, 63);
+                    /* пользовательские параметры */
                     char user_ptypes[MAX_OVERLOAD_PARAMS][64];
                     int  user_pcount = 0;
                     prescan_params(toks, &pos, user_ptypes, &user_pcount);
@@ -300,6 +355,7 @@ static void prescan(vector_token *toks) {
                     continue;
                 }
 
+                /* delete ( params ) { body } */
                 if (ct->type == TOK_KEYWORD && strcmp(ct->value, "delete") == 0) {
                     pos++;
                     char dtor_base[128];
@@ -327,6 +383,7 @@ static void prescan(vector_token *toks) {
                     continue;
                 }
 
+                /* [static] func <ret> <name> ( params ) { body } */
                 int is_static_method = 0;
                 if (ct->type == TOK_KEYWORD && strcmp(ct->value, "static") == 0) {
                     is_static_method = 1;
@@ -354,10 +411,12 @@ static void prescan(vector_token *toks) {
                     strncpy(mname, toks->data[pos].value, 63);
                     pos++;
 
+                    /* Базовое имя: ClassName_methodName */
                     char base_method[128];
                     snprintf(base_method, sizeof(base_method), "%s_%s",
                              class_name, mname);
 
+                    /* self параметр (только для нестатических) */
                     char param_types[MAX_OVERLOAD_PARAMS][64];
                     int  param_count = 0;
                     if (!is_static_method) {
@@ -917,6 +976,7 @@ vector_node *parse(int it, vector_token* tokenss) {
     known_class_count = 0;
     overload_count   = 0;
 
+    /* Первый проход: собираем все сигнатуры функций и методов */
     prescan(tokenss);
     
     vector_node *nodes = malloc(sizeof(vector_node));
@@ -947,7 +1007,7 @@ Node parseAssign(Token t) {
         vn_push_back(assign.childs, *ident);
         free(ident);
         
-        advance();
+        advance(); // [
         Node *idx = parseExpr();
         if (idx) {
             vn_push_back(assign.childs, *idx);
@@ -1087,13 +1147,18 @@ static Node parseFuncCallInner(Token t, int is_stmt) {
     }
     vn_push_back(call.childs, *args);
     free(args);
+
+    /* --- Резолюция перегрузки ---
+     * Пытаемся подобрать мэнглированное имя по базовому имени и типам аргументов.
+     * Если перегрузок нет — имя остаётся как есть (внешние C-функции, extern). */
     {
-        Node *args_in_call = &call.childs->data[1];
+        Node *args_in_call = &call.childs->data[1]; /* NODE_ARGS */
         const char *resolved = resolve_overload(t.value, args_in_call);
         if (resolved) {
             free(call.str);
             call.str = malloc(strlen(resolved) + 1);
             strcpy(call.str, resolved);
+            /* обновляем NODE_IDENT */
             free(call.childs->data[0].str);
             call.childs->data[0].str = malloc(strlen(resolved) + 1);
             strcpy(call.childs->data[0].str, resolved);
@@ -1366,6 +1431,11 @@ Node parseFuncDef(void) {
         printf("Error: expected '(' in function def\n");
         err();
     }
+
+    /* --- Мэнглинг имени функции ---
+     * Базовое имя берём из childs[1], параметры из childs[2].
+     * Мэнглированное имя: '_' + base + '_' + types...
+     * Регистрируем в таблице перегрузок. */
     {
         Node *name_node   = &func.childs->data[1];
         Node *params_node = &func.childs->data[2];
@@ -1391,11 +1461,13 @@ Node parseFuncDef(void) {
         build_mangled_name(base, (const char (*)[64])param_types,
                            param_count, mangled, sizeof(mangled));
 
+        /* Регистрируем перегрузку (ret_type из childs[0]) */
         const char *ret_type_str = func.childs->data[0].str;
         overload_push(base, mangled,
                       (const char (*)[64])param_types, param_count,
                       ret_type_str);
 
+        /* Переименовываем узел */
         free(name_node->str);
         name_node->str = malloc(strlen(mangled) + 1);
         strcpy(name_node->str, mangled);
@@ -1765,10 +1837,12 @@ Node parseClass(void) {
             Node *method_name_node = &method.childs->data[1];
             Node *method_params    = &method.childs->data[2];
 
+            /* Базовое имя метода: ClassName_methodName */
             char base_method[128];
             snprintf(base_method, sizeof(base_method), "%s_%s",
                      name.value, method_name_node->str);
 
+            /* Собираем типы параметров (без self — он добавляется позже) */
             char param_types[MAX_OVERLOAD_PARAMS][64];
             int  param_count = 0;
             if (method_params->type == NODE_PARAMS) {
@@ -1783,6 +1857,7 @@ Node parseClass(void) {
                 }
             }
 
+            /* Мэнглинг: _ClassName_method_types */
             char mangled_method[128];
             build_mangled_name(base_method,
                                (const char (*)[64])param_types, param_count,
@@ -2100,6 +2175,8 @@ static Node *expr_primary(void) {
             strncpy(fake.value, full_name, 63);
 
             Node call = parseFuncCallInner(fake, 0);
+            /* parseFuncCallInner уже провёл резолюцию перегрузки через resolve_overload,
+               поэтому call.str уже содержит мэнглированное имя метода. */
             vector_node *args_node = call.childs->data[1].childs;
 
             vector_node *new_args_childs = malloc(sizeof(vector_node));
