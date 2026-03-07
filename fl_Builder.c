@@ -59,6 +59,28 @@ static StructInfo* find_struct_info_by_name(const char *name) {
     return NULL;
 }
 
+static int __attribute__((unused)) collect_all_fields(const char *class_name,
+                               char all_fields[64][64],
+                               LLVMTypeRef all_field_types[64])
+{
+    StructInfo *info = find_struct_info_by_name(class_name);
+    if (!info) return 0;
+
+    int total_count = 0;
+
+    if (info->parent_name[0] != '\0') {
+        total_count = collect_all_fields(info->parent_name, all_fields, all_field_types);
+    }
+
+    for (int i = 0; i < info->field_count && total_count < 64; i++) {
+        strncpy(all_fields[total_count], info->field_names[i], 63);
+        all_field_types[total_count] = info->field_types[i];
+        total_count++;
+    }
+
+    return total_count;
+}
+
 static LLVMTypeRef type_lookup(const char *name) {
     for (int j = type_count - 1; j >= 0; j--)
         if (strcmp(type_table[j].name, name) == 0)
@@ -102,28 +124,6 @@ static void sym_restore(int cp) { sym_count = cp; }
 static LLVMContextRef ctx;
 static LLVMModuleRef  mod;
 static LLVMBuilderRef builder;
-
-/*
- * Ищет функцию в модуле по точному имени.
- * Если не нашёл — ищет первую функцию с именем "_<prefix>_",
- * что покрывает мэнглированные имена ctor/dtor без знания точных типов.
- * Например: "MyClass_new" -> ищет "_MyClass_new_..."
- */
-static LLVMValueRef find_func_by_prefix(const char *base_name) {
-    LLVMValueRef f = LLVMGetNamedFunction(mod, base_name);
-    if (f) return f;
-
-    char prefix[132];
-    snprintf(prefix, sizeof(prefix), "_%s_", base_name);
-    int plen = (int)strlen(prefix);
-
-    for (LLVMValueRef fn = LLVMGetFirstFunction(mod); fn; fn = LLVMGetNextFunction(fn)) {
-        const char *fn_name = LLVMGetValueName(fn);
-        if (strncmp(fn_name, prefix, plen) == 0)
-            return fn;
-    }
-    return NULL;
-}
 
 static LLVMTypeRef llvm_type_from_str(const char *s) {
     int len = strlen(s);
@@ -384,10 +384,7 @@ static LLVMValueRef codegen_func_call(Node *n) {
         func  = s->value;
         ftype = s->type;
     } else {
-        /* Сначала точный поиск, потом по префиксу (мэнглинг) */
         func = LLVMGetNamedFunction(mod, fname);
-        if (!func)
-            func = find_func_by_prefix(fname);
         if (!func) {
             fprintf(stderr, "codegen error: undefined function '%s'\n", fname);
             return NULL;
@@ -532,6 +529,15 @@ static LLVMValueRef codegen_func_def(Node *n) {
     Node        *scope    = &n->childs->data[3];
     LLVMTypeRef  ret_type = llvm_type_from_str(ret_str);
 
+    int  is_extern_c = (strncmp(fname, "__extern_c__", 12) == 0);
+    char real_name[128];
+    if (is_extern_c)
+        strncpy(real_name, fname + 12, sizeof(real_name) - 1);
+    else
+        strncpy(real_name, fname, sizeof(real_name) - 1);
+    real_name[sizeof(real_name) - 1] = '\0';
+    fname = real_name;
+
     LLVMTypeRef param_types[64];
     unsigned    param_count = 0;
 
@@ -545,6 +551,9 @@ static LLVMValueRef codegen_func_def(Node *n) {
 
     LLVMTypeRef  func_type = LLVMFunctionType(ret_type, param_types, param_count, 0);
     LLVMValueRef func      = LLVMAddFunction(mod, fname, func_type);
+
+    if (is_extern_c)
+        LLVMSetLinkage(func, LLVMExternalLinkage);
 
     sym_push(fname, func, func_type, 1);
 
@@ -572,7 +581,6 @@ static LLVMValueRef codegen_func_def(Node *n) {
                 char base[64];
                 strncpy(base, ptype_str, plen - 1);
                 base[plen - 1] = '\0';
-                /* type_lookup ищет только struct'ы, для int/char/etc нужен llvm_type_from_str */
                 elem_type = llvm_type_from_str(base);
             }
 
@@ -780,7 +788,7 @@ static void codegen_new(Node *n, LLVMValueRef var_ptr, LLVMTypeRef elem_type) {
 
     char init_name[128];
     snprintf(init_name, sizeof(init_name), "%s_new", n->str);
-    LLVMValueRef init_fn = find_func_by_prefix(init_name);
+    LLVMValueRef init_fn = LLVMGetNamedFunction(mod, init_name);
     if (init_fn) {
         LLVMTypeRef  init_type = LLVMGlobalGetValueType(init_fn);
         LLVMValueRef args[65];
@@ -1197,7 +1205,7 @@ static LLVMValueRef codegen_delete(Node *n) {
         if (struct_name) {
             char dtor_name[128];
             snprintf(dtor_name, sizeof(dtor_name), "%s_delete", struct_name);
-            LLVMValueRef dtor = find_func_by_prefix(dtor_name);
+            LLVMValueRef dtor = LLVMGetNamedFunction(mod, dtor_name);
             if (dtor) {
                 LLVMTypeRef  dtor_type = LLVMGlobalGetValueType(dtor);
 
@@ -1218,11 +1226,6 @@ static LLVMValueRef codegen_delete(Node *n) {
     LLVMValueRef free_fn   = LLVMGetNamedFunction(mod, "free");
     LLVMTypeRef  free_type = LLVMGlobalGetValueType(free_fn);
     LLVMBuildCall2(builder, free_type, free_fn, &ptr, 1, "");
-
-    /* Обнуляем указатель: a = null */
-    LLVMBuildStore(builder,
-        LLVMConstNull(LLVMPointerTypeInContext(ctx, 0)),
-        s->value);
 
     return NULL;
 }

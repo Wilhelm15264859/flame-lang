@@ -1,44 +1,47 @@
-extern func int printf(char* fmt);
-extern func int scanf(char* fmt, int* val);
-
-func int add(int a, int b) {
-    return a + b;
-}
-
-func int factorial(int n) {
-    if (n <= 1) {
-        return 1;
-    }
-    return n * factorial(n - 1);
-}
-
-func int fibonacci(int n) {
-    if (n <= 1) {
-        return n;
-    }
-    var int a = 0;
-    var int b = 1;
-    var int i = 2;
-    while (i <= n) {
-        var int tmp = a + b;
+// ===== Тест 1: swap =====
+exception swap_args {
+    instruction { swap %i:a %i:b }
+    replace {
+        var int tmp = a;
         a = b;
         b = tmp;
-        i++;
     }
-    return b;
 }
 
+func void panic() {}
+
 func int main() {
-    printf("=== basic tests ===\n");
+    var int x = 10;
+    var int y = 20;
+    swap x y;
+}
 
-    var int r = add(3, 4);
-    printf("add(3,4) = %d\n", r);
+// ===== Тест 2: bounds_check =====
+exception bounds_check {
+    var int idx;
+    instruction { %i:arr [ %n:idx ]; }
+    check {
+        if (idx < 0) {
+            panic();
+        }
+    }
+}
 
-    var int f = factorial(10);
-    printf("factorial(10) = %d\n", f);
+func void test2() {
+    var int arr[5];
+    arr[3] = 0;
+    arr[1] = 0;
+}
 
-    var int fib = fibonacci(10);
-    printf("fibonacci(10) = %d\n", fib);
+// ===== Тест 3: let sugar =====
+exception let_sugar {
+    var int val;
+    instruction { let %i:name = %n:val }
+    replace {
+        $%TOK_KEYWORD "var" $%TOK_TYPE "int" name = val;
+    }
+}
 
-    return 0;
+func void test3() {
+    let myVar = 99;
 }

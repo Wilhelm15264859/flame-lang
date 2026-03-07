@@ -386,6 +386,22 @@ static int try_match(vector_token *tokens, int pos, Exception *ex,
 
 static int g_match_counter = 0;
 
+static int capture_has_field(Exception *ex, const char *cap_name,
+                              char *field_type_out)
+{
+    for (int fi = 0; fi < ex->field_count - 2; fi++) {
+        if (ex->fields[fi].type == TOK_KEYWORD &&
+            strcmp(ex->fields[fi].value, "var") == 0 &&
+            strcmp(ex->fields[fi + 2].value, cap_name) == 0)
+        {
+            if (field_type_out)
+                strncpy(field_type_out, ex->fields[fi + 1].value, 63);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static void build_capture_inits(Exception *ex,
                                  char      captures[MAX_PATTERN_TOKENS][64],
                                  TokenType capture_types[MAX_PATTERN_TOKENS],
@@ -400,15 +416,10 @@ static void build_capture_inits(Exception *ex,
         const char *cap_val  = captures[pi];
         TokenType   cap_type = capture_types[pi];
 
-        char field_type[64] = "int";
-        for (int fi = 0; fi < ex->field_count - 2; fi++) {
-            if (ex->fields[fi].type == TOK_KEYWORD &&
-                strcmp(ex->fields[fi].value, "var") == 0 &&
-                strcmp(ex->fields[fi + 2].value, cap_name) == 0)
-            {
-                strncpy(field_type, ex->fields[fi + 1].value, 63);
-                break;
-            }
+        char field_type[64] = "";
+        if (!capture_has_field(ex, cap_name, field_type)) {
+            strncpy(unique_names[pi], cap_val, 63);
+            continue;
         }
 
         char cap_trunc[49];
@@ -519,7 +530,6 @@ vector_token *preparse(vector_token *tokens) {
                         ci + 1 < ex->replace_len &&
                         strcmp(replace_copy[ci + 1].value, "source") == 0)
                     {
-                        /* $source */
                         int next_is_semi = (ci + 2 < ex->replace_len &&
                             replace_copy[ci + 2].type == TOK_SEMICOLON);
                         int emit_len = next_is_semi ? source_len - 1 : source_len;
@@ -535,7 +545,6 @@ vector_token *preparse(vector_token *tokens) {
                                ci + 3 < ex->replace_len &&
                                replace_copy[ci + 3].type == TOK_STRING)
                     {
-                        /* $%TOK_IDENT "value" — синтетический токен */
                         Token synth;
                         synth.type = tok_type_from_name(replace_copy[ci + 2].value);
                         synth.line = 0;
@@ -551,7 +560,6 @@ vector_token *preparse(vector_token *tokens) {
                                ci + 2 < ex->replace_len &&
                                replace_copy[ci + 2].type == TOK_INT)
                     {
-                        /* $-N — токен позади начала совпадения */
                         int offset  = -atoi(replace_copy[ci + 2].value);
                         int abs_idx = (int)i + offset;
                         if (abs_idx >= 0 && (unsigned)abs_idx < tokens->size)
@@ -564,7 +572,6 @@ vector_token *preparse(vector_token *tokens) {
                                ci + 1 < ex->replace_len &&
                                replace_copy[ci + 1].type == TOK_INT)
                     {
-                        /* $N — токен с offset N от начала совпадения */
                         int offset  = atoi(replace_copy[ci + 1].value);
                         int abs_idx = (int)i + offset;
                         if (abs_idx >= 0 && (unsigned)abs_idx < tokens->size)
@@ -581,6 +588,11 @@ vector_token *preparse(vector_token *tokens) {
                 free(replace_copy);
                 if (suffix) free(suffix);
                 free(source);
+
+                i += match_len;
+                if (i < tokens->size && tokens->data[i].type == TOK_SEMICOLON)
+                    i++;
+                stmt_start = (int)result->size;
 
             } else {
                 int inject_pos = stmt_start;
@@ -611,18 +623,9 @@ vector_token *preparse(vector_token *tokens) {
 
                 for (int mi = 0; mi < match_len; mi++)
                     vt_push_back(result, tokens->data[i + mi]);
-                {
-                    Token semi;
-                    semi.type = TOK_SEMICOLON;
-                    strncpy(semi.value, ";", 63);
-                    vt_push_back(result, semi);
-                }
+
+                i += match_len;
             }
-
-            i += match_len;
-
-            if (i < tokens->size && tokens->data[i].type == TOK_SEMICOLON)
-                i++;
         }
 
         if (!matched) {
@@ -635,8 +638,6 @@ vector_token *preparse(vector_token *tokens) {
                 stmt_start = (int)result->size;
             }
             i++;
-        } else {
-            stmt_start = (int)result->size;
         }
     }
 
