@@ -55,7 +55,7 @@ The possible location is defined in `instruction {}`, and has its own formatting
     TOK_ERROR,
     TOK_TYPE
 
-### Exemple:
+### Example:
 ```Flame
 exception DivByZero {
   var int op;
