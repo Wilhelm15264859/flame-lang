@@ -809,8 +809,6 @@ static void codegen_new(Node *n, LLVMValueRef var_ptr, LLVMTypeRef elem_type) {
 static LLVMValueRef codegen_var_def(Node *n) {
     if (n->childs->size < 2) return NULL;
 
-    if (n->childs->size < 2) return NULL;
-
     const char *type_str_raw = n->childs->data[0].str;
     const char *name         = n->childs->data[1].str;
 
@@ -1302,7 +1300,7 @@ static LLVMValueRef codegen_node(Node *n) {
         case NODE_RETURN:          return codegen_return(n);
         case NODE_ARRAY_DEF:       return codegen_array_def(n);
         case NODE_ASSIGN:          return codegen_assign(n);
-        case NODE_INDEX_ASSIGN:    return codegen_index_assign(n); 
+        case NODE_INDEX_ASSIGN:    return codegen_index_assign(n);
         case NODE_PTR_ASSIGN:      return codegen_ptr_assign(n);
         case NODE_ADDR:            return codegen_addr(n);
         case NODE_DEREF:           return codegen_deref(n);
@@ -1330,38 +1328,48 @@ static LLVMValueRef codegen_node(Node *n) {
     }
 }
 
+static void init_all_targets(void) {
+    LLVMInitializeAllTargetInfos();
+    LLVMInitializeAllTargets();
+    LLVMInitializeAllTargetMCs();
+    LLVMInitializeAllAsmPrinters();
+    LLVMInitializeAllAsmParsers();
+}
 
-void codegen(vector_node *nodes, const char *out_file, const char *extra_link_flags) {
-    sym_count = 0;
-    type_count = 0;
+void codegen(vector_node *nodes, const char *out_file,
+             const char *extra_link_flags, const char *target_triple) {
+    sym_count         = 0;
+    type_count        = 0;
     struct_info_count = 0;
-    memset(sym_table, 0, sizeof(sym_table));
-    memset(type_table, 0, sizeof(type_table));
-    memset(struct_info, 0, sizeof(struct_info));
+    memset(sym_table,    0, sizeof(sym_table));
+    memset(type_table,   0, sizeof(type_table));
+    memset(struct_info,  0, sizeof(struct_info));
 
     ctx     = LLVMContextCreate();
     mod     = LLVMModuleCreateWithNameInContext("flame", ctx);
     builder = LLVMCreateBuilderInContext(ctx);
 
-    LLVMInitializeX86TargetInfo();
-    LLVMInitializeX86Target();
-    LLVMInitializeX86TargetMC();
-    LLVMInitializeX86AsmPrinter();
-    LLVMInitializeX86AsmParser();
+    init_all_targets();
 
-    char *triple = LLVMGetDefaultTargetTriple();
+    char *default_triple = LLVMGetDefaultTargetTriple();
+    const char *triple   = (target_triple && target_triple[0] != '\0')
+                           ? target_triple
+                           : default_triple;
+
+    fprintf(stderr, "codegen: target triple = %s\n", triple);
     LLVMSetTarget(mod, triple);
 
-    LLVMTargetRef target;
+    LLVMTargetRef target_ref = NULL;
     char *err_target = NULL;
-    LLVMGetTargetFromTriple(triple, &target, &err_target);
-    if (err_target) {
+    if (LLVMGetTargetFromTriple(triple, &target_ref, &err_target)) {
         fprintf(stderr, "codegen: target error: %s\n", err_target);
         LLVMDisposeMessage(err_target);
+        LLVMDisposeMessage(default_triple);
+        return;
     }
 
     LLVMTargetMachineRef machine = LLVMCreateTargetMachine(
-        target,
+        target_ref,
         triple,
         "generic",
         "",
@@ -1370,9 +1378,15 @@ void codegen(vector_node *nodes, const char *out_file, const char *extra_link_fl
         LLVMCodeModelDefault
     );
 
+    if (!machine) {
+        fprintf(stderr, "codegen: failed to create target machine for '%s'\n", triple);
+        LLVMDisposeMessage(default_triple);
+        return;
+    }
+
     LLVMTargetDataRef data_layout = LLVMCreateTargetDataLayout(machine);
     LLVMSetModuleDataLayout(mod, data_layout);
-    LLVMDisposeMessage(triple);
+    LLVMDisposeMessage(default_triple);
 
     {
         LLVMTypeRef malloc_params[] = { LLVMInt64TypeInContext(ctx) };
@@ -1402,11 +1416,8 @@ void codegen(vector_node *nodes, const char *out_file, const char *extra_link_fl
     char *ir = LLVMPrintModuleToString(mod);
     if (ir) {
         FILE *f = fopen(ir_file, "w");
-        if (f) {
-            fputs(ir, f);
-            fclose(f);
-            fprintf(stderr, "codegen: wrote IR '%s'\n", ir_file);
-        }
+        if (f) { fputs(ir, f); fclose(f); }
+        fprintf(stderr, "codegen: wrote IR '%s'\n", ir_file);
         LLVMDisposeMessage(ir);
     }
 
@@ -1414,17 +1425,26 @@ void codegen(vector_node *nodes, const char *out_file, const char *extra_link_fl
     snprintf(obj_file, sizeof(obj_file), "%s.o", out_file);
 
     char *emit_err = NULL;
-    if (LLVMTargetMachineEmitToFile(machine, mod,
-                                    obj_file,
-                                    LLVMObjectFile,
-                                    &emit_err)) {
+    if (LLVMTargetMachineEmitToFile(machine, mod, obj_file,
+                                    LLVMObjectFile, &emit_err)) {
         fprintf(stderr, "codegen: emit error: %s\n", emit_err);
         LLVMDisposeMessage(emit_err);
     } else {
         fprintf(stderr, "codegen: wrote object '%s'\n", obj_file);
 
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "gcc %s -o %s -lc -no-pie %s", obj_file, out_file, extra_link_flags ? extra_link_flags : "");
+        char cmd[1024];
+        if (target_triple && target_triple[0] != '\0') {
+            snprintf(cmd, sizeof(cmd),
+                "clang --target=%s %s -o %s -lc -no-pie %s",
+                target_triple, obj_file, out_file,
+                extra_link_flags ? extra_link_flags : "");
+        } else {
+            snprintf(cmd, sizeof(cmd),
+                "clang %s -o %s -lc -no-pie %s",
+                obj_file, out_file,
+                extra_link_flags ? extra_link_flags : "");
+        }
+
         int ret = system(cmd);
         if (ret != 0)
             fprintf(stderr, "codegen: linker failed (code %d)\n", ret);

@@ -4,12 +4,15 @@
 #include "fl_Parser.h"
 #include "fl_Pregen.h"
 #include "fl_Builder.h"
+#include <llvm-c/Target.h>
+#include <llvm-c/Error.h>
+#include <llvm-c/TargetMachine.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <libgen.h>
 
-const char* version = "1.2.0-STABLE";
+const char* version = "1.6.0-STABLE";
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -29,20 +32,25 @@ int main(int argc, char *argv[]) {
         }
 
         const char *input_file = argv[2];
-        char link_flags[512] = "";
+        char link_flags[512]   = "";
+        const char *target     = NULL;
 
         for (int i = 3; i < argc; i++) {
             if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
-                strncat(link_flags, " -l", sizeof(link_flags) - strlen(link_flags) - 1);
+                strncat(link_flags, " -l",    sizeof(link_flags) - strlen(link_flags) - 1);
                 strncat(link_flags, argv[++i], sizeof(link_flags) - strlen(link_flags) - 1);
             } else if (strncmp(argv[i], "-l", 2) == 0) {
-                strncat(link_flags, " ", sizeof(link_flags) - strlen(link_flags) - 1);
-                strncat(link_flags, argv[i], sizeof(link_flags) - strlen(link_flags) - 1);
+                strncat(link_flags, " ",      sizeof(link_flags) - strlen(link_flags) - 1);
+                strncat(link_flags, argv[i],  sizeof(link_flags) - strlen(link_flags) - 1);
+            } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
+                target = argv[++i];
             } else {
                 printf("Flame language\n\tUnknown flag '%s'\n", argv[i]);
                 return 1;
             }
         }
+
+        if (!target) target = "";
 
         char filen[256];
         snprintf(filen, sizeof(filen), "%s.fl", input_file);
@@ -64,7 +72,6 @@ int main(int argc, char *argv[]) {
             printf("Flame language\n\tCannot read file\n");
             return 1;
         }
-
         fread(buffer, 1, length, file);
         buffer[length] = '\0';
         fclose(file);
@@ -73,6 +80,14 @@ int main(int argc, char *argv[]) {
         strncpy(filen_copy, filen, 255);
         char *base_dir = dirname(filen_copy);
 
+        if (target && target[0] != '\0') {
+            preprocess_set_target(target);
+        } else {
+            char *host = LLVMGetDefaultTargetTriple();
+            preprocess_set_target(host);
+            LLVMDisposeErrorMessage(host);
+        }
+
         char *processed = preprocess(buffer, base_dir);
         free(buffer);
         if (!processed) {
@@ -80,23 +95,26 @@ int main(int argc, char *argv[]) {
             return 1;
         }
 
-        vector_token *tokens = lexing(processed);
+        if (!target || target[0] == '\0') {
+            const char *src_target = preprocess_get_target();
+            if (src_target) target = src_target;
+        }
+
+        vector_token *tokens       = lexing(processed);
         free(processed);
 
         vector_token *tokens_clean = extract_exceptions(tokens);
-        vt_free(tokens);
-        free(tokens);
+        vt_free(tokens); free(tokens);
 
         vector_token *tokens_ready = preparse(tokens_clean);
-        vt_free(tokens_clean);
-        free(tokens_clean);
+        vt_free(tokens_clean); free(tokens_clean);
 
         vector_node *nodes = parse(0, tokens_ready);
-        vt_free(tokens_ready);
-        free(tokens_ready);
+        vt_free(tokens_ready); free(tokens_ready);
 
         pregen(nodes);
-        codegen(nodes, input_file, link_flags);
+        codegen(nodes, input_file, link_flags, target);
+
         return 0;
     }
 

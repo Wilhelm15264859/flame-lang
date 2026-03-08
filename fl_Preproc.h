@@ -1,10 +1,5 @@
-// fl_Preprocessor.h
-#ifndef FL_PREPROCESSOR_H
-#define FL_PREPROCESSOR_H
+#pragma once
 
-// source  — исходный текст
-// base_dir — папка для поиска #include файлов (например "." или dirname входного файла)
-// возвращает новую строку, которую нужно free() после использования
-char *preprocess(const char *source, const char *base_dir);
-
-#endif
+char       *preprocess(const char *source, const char *base_dir);
+void        preprocess_set_target(const char *triple);
+const char *preprocess_get_target(void);

@@ -1,4 +1,5 @@
 #include "fl_Parser.h"
+#include "fl_Preproc.h"
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
@@ -24,31 +25,68 @@ static const char *var_type_lookup(const char *var) {
     return NULL;
 }
 
-/* -----------------------------------------------------------------------
- * Таблица перегрузок функций.
- * Для каждого базового имени хранится список мэнглированных вариантов
- * с типами параметров, чтобы при вызове подобрать нужный.
- * ----------------------------------------------------------------------- */
 #define MAX_OVERLOADS      256
 #define MAX_OVERLOAD_PARAMS 16
 
 typedef struct {
-    char base_name[64];      /* исходное имя: "a"            */
-    char mangled[128];       /* мэнглированное: "_a_intint"  */
-    char param_types[MAX_OVERLOAD_PARAMS][64]; /* типы параметров */
+    const char *prefix;
+    const char *triple_component;
+} AsmArchEntry;
+
+static const AsmArchEntry asm_arch_table[] = {
+    { "x86",     "x86"     },
+    { "x86_64",  "x86_64"  },
+    { "i386",    "i386"    },
+    { "i686",    "i686"    },
+    { "arm",     "arm"     },
+    { "armeb",   "armeb"   },
+    { "thumb",   "thumb"   },
+    { "thumbeb", "thumbeb" },
+    { "aarch64", "aarch64" },
+    { "riscv32", "riscv32" },
+    { "riscv64", "riscv64" },
+    { "mips",    "mips"    },
+    { "mips64",  "mips64"  },
+    { "ppc",     "ppc"     },
+    { "ppc64",   "ppc64"   },
+    { "wasm32",  "wasm32"  },
+    { "wasm64",  "wasm64"  },
+    { "avr",     "avr"     },
+    { "msp430",  "msp430"  },
+    { "bpf",     "bpf"     },
+    { "sparc",   "sparc"   },
+    { "sparc64", "sparc64" },
+    { NULL, NULL }
+};
+
+static int triple_has_component(const char *triple, const char *component) {
+    size_t clen = strlen(component);
+    const char *p = triple;
+    while (p && *p) {
+        if (strncmp(p, component, clen) == 0 &&
+            (p[clen] == '-' || p[clen] == '\0' || p[clen] == '_'))
+            return 1;
+        p = strchr(p, '-');
+        if (p) p++;
+    }
+    return 0;
+}
+
+typedef struct {
+    char base_name[64];
+    char mangled[128];
+    char param_types[MAX_OVERLOAD_PARAMS][64];
     int  param_count;
-    char ret_type[64];       /* возвращаемый тип: "int", "void", "MyClass*" */
+    char ret_type[64];
 } OverloadEntry;
 
 static OverloadEntry overload_table[MAX_OVERLOADS];
 static int           overload_count = 0;
 
-/* Регистрирует перегрузку. */
 static void overload_push(const char *base, const char *mangled,
                            const char param_types[][64], int param_count,
                            const char *ret_type)
 {
-    /* Обновляем если уже есть (двойная регистрация из prescan + parseFuncDef) */
     for (int i = 0; i < overload_count; i++) {
         if (strcmp(overload_table[i].mangled, mangled) == 0) return;
     }
@@ -66,12 +104,6 @@ static void overload_push(const char *base, const char *mangled,
         strncpy(e->param_types[i], param_types[i], 63);
 }
 
-/*
- * Строит мэнглированное имя функции:
- *   base="_" + name + "_" + type0 + type1 + ...
- * Типы нормализуются: пробелы и '*' убираются, всё в нижнем регистре.
- * Например: "a", {"int","int"} -> "_a_intint"
- */
 static void build_mangled_name(const char *base,
                                 const char param_types[][64], int param_count,
                                 char *out, int out_size)
@@ -87,29 +119,24 @@ static void build_mangled_name(const char *base,
         if (strncmp(t, "autodel:", 8) == 0) t += 8;
         for (; *t && pos < out_size - 1; t++) {
             if (*t == ' ') continue;
-            if (*t == '*') { out[pos++] = 'p'; continue; } /* char* -> charp */
+            if (*t == '*') { out[pos++] = 'p'; continue; }
             out[pos++] = (char)tolower((unsigned char)*t);
         }
     }
     out[pos] = '\0';
 }
 
-/* Нормализует строку типа в буфер: убирает autodel:, *, пробелы, lowercase */
 static void normalize_type(const char *src, char *out, int out_size) {
     if (strncmp(src, "autodel:", 8) == 0) src += 8;
     int j = 0;
     for (; *src && j < out_size - 1; src++) {
         if (*src == ' ') continue;
-        if (*src == '*') { out[j++] = 'p'; continue; } /* char* -> charp, int* -> intp */
+        if (*src == '*') { out[j++] = 'p'; continue; }
         out[j++] = (char)tolower((unsigned char)*src);
     }
     out[j] = '\0';
 }
 
-/*
- * Выводит тип AST-узла аргумента в виде строки.
- * Возвращает 1 если тип известен, 0 если нет.
- */
 static int node_infer_type(Node *n, char *out, int out_size) {
     if (!n) return 0;
     switch (n->type) {
@@ -127,23 +154,19 @@ static int node_infer_type(Node *n, char *out, int out_size) {
             return 0;
         }
         case NODE_FUNC_CALL: {
-            /* Ищем возвращаемый тип по мэнглированному имени вызова */
             for (int i = 0; i < overload_count; i++) {
                 if (strcmp(overload_table[i].mangled, n->str) == 0) {
                     strncpy(out, overload_table[i].ret_type, out_size - 1);
                     return 1;
                 }
             }
-            /* Если имя не мэнглировано (extern C) — тип неизвестен */
             return 0;
         }
         case NODE_MEMBER_DOT:
         case NODE_MEMBER_ARROW: {
-            /* obj.field или obj->field — тип поля неизвестен без полного анализа */
             return 0;
         }
         case NODE_BINOP: {
-            /* Тип бинарной операции — берём тип левого операнда */
             if (n->childs && n->childs->size >= 1)
                 return node_infer_type(&n->childs->data[0], out, out_size);
             return 0;
@@ -152,12 +175,6 @@ static int node_infer_type(Node *n, char *out, int out_size) {
     }
 }
 
-/*
- * Ищет перегрузку по базовому имени и типам аргументов.
- * Если типы аргументов известны — ищет точное совпадение.
- * Если типы частично неизвестны — ищет единственную перегрузку с нужным числом параметров.
- * Возвращает мэнглированное имя или NULL.
- */
 static const char *resolve_overload(const char *base, Node *args_node)
 {
     int argc = (int)(args_node ? args_node->childs->size : 0);
@@ -180,7 +197,6 @@ static const char *resolve_overload(const char *base, Node *args_node)
     if (cand_count == 0) return NULL;
     if (cand_count == 1) return candidates[0]->mangled;
 
-    /* Точное совпадение по известным типам */
     for (int ci = 0; ci < cand_count; ci++) {
         OverloadEntry *e = candidates[ci];
         int match = 1;
@@ -199,13 +215,6 @@ static const char *resolve_overload(const char *base, Node *args_node)
     return candidates[0]->mangled;
 }
 
-/* -----------------------------------------------------------------------
- * Prescan — первый проход по токенам.
- * Собирает все объявления func/class без парсинга тел,
- * регистрирует их в overload_table до основного прохода.
- * ----------------------------------------------------------------------- */
-
-/* Пропускает сбалансированный блок { ... } начиная с позиции *pos (на '{') */
 static void prescan_skip_block(vector_token *toks, int *pos) {
     if (*pos >= (int)toks->size || strcmp(toks->data[*pos].value, "{") != 0)
         return;
@@ -218,15 +227,13 @@ static void prescan_skip_block(vector_token *toks, int *pos) {
     }
 }
 
-/* Разбирает список параметров "(type name, type name, ...)" начиная с '('.
- * Заполняет param_types и param_count. Оставляет *pos на ')' или после него. */
 static void prescan_params(vector_token *toks, int *pos,
                             char param_types[][64], int *param_count)
 {
     *param_count = 0;
     if (*pos >= (int)toks->size || strcmp(toks->data[*pos].value, "(") != 0)
         return;
-    (*pos)++; /* skip '(' */
+    (*pos)++;
 
     while (*pos < (int)toks->size && strcmp(toks->data[*pos].value, ")") != 0) {
         Token *t = &toks->data[*pos];
@@ -234,23 +241,20 @@ static void prescan_params(vector_token *toks, int *pos,
             char type_buf[64];
             strncpy(type_buf, t->value, 63);
             (*pos)++;
-            /* указатель? */
             if (*pos < (int)toks->size && strcmp(toks->data[*pos].value, "*") == 0) {
                 strncat(type_buf, "*", 63 - strlen(type_buf));
                 (*pos)++;
             }
             if (*param_count < MAX_OVERLOAD_PARAMS)
                 strncpy(param_types[(*param_count)++], type_buf, 63);
-            /* пропускаем имя параметра */
             if (*pos < (int)toks->size && toks->data[*pos].type == TOK_IDENT)
                 (*pos)++;
         }
-        /* запятая */
         if (*pos < (int)toks->size && toks->data[*pos].type == TOK_COMMA)
             (*pos)++;
     }
     if (*pos < (int)toks->size && strcmp(toks->data[*pos].value, ")") == 0)
-        (*pos)++; /* skip ')' */
+        (*pos)++;
 }
 
 static void prescan(vector_token *toks) {
@@ -260,9 +264,6 @@ static void prescan(vector_token *toks) {
     while (pos < n) {
         Token *t = &toks->data[pos];
 
-        /* func <rettype>[*] <name> ( params ) { body } */
-
-        /* extern "C" func — регистрируем без мэнглинга */
         if (t->type == TOK_KEYWORD && strcmp(t->value, "extern") == 0 &&
             pos + 2 < n &&
             toks->data[pos + 1].type == TOK_STRING &&
@@ -301,7 +302,6 @@ static void prescan(vector_token *toks) {
             pos++;
             if (pos >= n) break;
 
-            /* возвращаемый тип */
             char ret_type[64] = "void";
             if (toks->data[pos].type == TOK_TYPE ||
                 toks->data[pos].type == TOK_IDENT)
@@ -314,18 +314,15 @@ static void prescan(vector_token *toks) {
                 }
             }
 
-            /* имя функции */
             if (pos >= n || toks->data[pos].type != TOK_IDENT) continue;
             char func_name[64];
             strncpy(func_name, toks->data[pos].value, 63);
             pos++;
 
-            /* параметры */
             char param_types[MAX_OVERLOAD_PARAMS][64];
             int  param_count = 0;
             prescan_params(toks, &pos, param_types, &param_count);
 
-            /* мэнглинг и регистрация */
             char mangled[128];
             if (strcmp(func_name, "main") == 0)
                 strncpy(mangled, "main", sizeof(mangled));
@@ -339,13 +336,11 @@ static void prescan(vector_token *toks) {
             printf("DEBUG prescan: func '%s' -> '%s' ret='%s'\n",
                    func_name, mangled, ret_type);
 
-            /* пропускаем тело */
             if (pos < n && strcmp(toks->data[pos].value, "{") == 0)
                 prescan_skip_block(toks, &pos);
             continue;
         }
 
-        /* class <name> [< parent] { ... func ... } */
         if (t->type == TOK_KEYWORD && strcmp(t->value, "class") == 0) {
             pos++;
             if (pos >= n || toks->data[pos].type != TOK_IDENT) continue;
@@ -353,32 +348,27 @@ static void prescan(vector_token *toks) {
             strncpy(class_name, toks->data[pos].value, 63);
             pos++;
 
-            /* наследование < Parent */
             if (pos < n && strcmp(toks->data[pos].value, "<") == 0) {
-                pos++; /* skip '<' */
-                if (pos < n) pos++; /* skip parent name */
+                pos++;
+                if (pos < n) pos++;
             }
 
-            /* тело класса */
             if (pos >= n || strcmp(toks->data[pos].value, "{") != 0) continue;
-            pos++; /* skip '{' */
+            pos++;
 
             int depth = 1;
             while (pos < n && depth > 0) {
                 Token *ct = &toks->data[pos];
 
-                /* new ( params ) { body } */
                 if (ct->type == TOK_KEYWORD && strcmp(ct->value, "new") == 0) {
                     pos++;
                     char ctor_base[128];
                     snprintf(ctor_base, sizeof(ctor_base), "%s_new", class_name);
-                    /* self параметр не в исходнике, добавим вручную */
                     char self_type[68];
                     snprintf(self_type, sizeof(self_type), "%s*", class_name);
                     char param_types[MAX_OVERLOAD_PARAMS][64];
                     int  param_count = 0;
                     strncpy(param_types[param_count++], self_type, 63);
-                    /* пользовательские параметры */
                     char user_ptypes[MAX_OVERLOAD_PARAMS][64];
                     int  user_pcount = 0;
                     prescan_params(toks, &pos, user_ptypes, &user_pcount);
@@ -397,7 +387,6 @@ static void prescan(vector_token *toks) {
                     continue;
                 }
 
-                /* delete ( params ) { body } */
                 if (ct->type == TOK_KEYWORD && strcmp(ct->value, "delete") == 0) {
                     pos++;
                     char dtor_base[128];
@@ -425,7 +414,6 @@ static void prescan(vector_token *toks) {
                     continue;
                 }
 
-                /* [static] func <ret> <name> ( params ) { body } */
                 int is_static_method = 0;
                 if (ct->type == TOK_KEYWORD && strcmp(ct->value, "static") == 0) {
                     is_static_method = 1;
@@ -453,12 +441,10 @@ static void prescan(vector_token *toks) {
                     strncpy(mname, toks->data[pos].value, 63);
                     pos++;
 
-                    /* Базовое имя: ClassName_methodName */
                     char base_method[128];
                     snprintf(base_method, sizeof(base_method), "%s_%s",
                              class_name, mname);
 
-                    /* self параметр (только для нестатических) */
                     char param_types[MAX_OVERLOAD_PARAMS][64];
                     int  param_count = 0;
                     if (!is_static_method) {
@@ -565,7 +551,7 @@ Node parseReturn(void);
 Node parsePtrAssign(void);
 Node *parseExpr(void);
 Node parseStruct(void);
-Node parseAsm(void);
+Node parseAsm(Token arch_tok);
 Node parseClass(void);
 Node parseCompoundAssign(Token t);
 Node parseFor(void);
@@ -589,7 +575,6 @@ Node parsing(void) {
         if (strcmp(current.value, "return") == 0) return parseReturn();
         if (strcmp(current.value, "struct") == 0) return parseStruct();
         if (strcmp(current.value, "class")  == 0) return parseClass();
-        if (strcmp(current.value, "x86")    == 0) return parseAsm();
         if (strcmp(current.value, "for")    == 0) return parseFor();
         if (strcmp(current.value, "do")     == 0) return parseDoWhile();
         if (strcmp(current.value, "delete") == 0) return parseDelete();
@@ -599,6 +584,7 @@ Node parsing(void) {
                 return parseExternCFuncDef();
             return parseExternFuncDef();
         }
+        return parseAsm(current);
     }
 
     if (current.type == TOK_OP && strcmp(current.value, "*") == 0)
@@ -1001,7 +987,7 @@ Node parseCompoundAssign(Token t) {
     return assign;
 }
 
-Node parseAsm(void) {
+Node parseAsm(Token arch_tok) {
     Node asmnode;
     memset(&asmnode, 0, sizeof(Node));
     asmnode.childs = malloc(sizeof(vector_node));
@@ -1009,22 +995,55 @@ Node parseAsm(void) {
     asmnode.str = malloc(256);
     asmnode.str[0] = '\0';
 
-    char instr[256];
-    instr[0] = '\0';
-    int operand_count = 0;
+    const char *asm_component = NULL;
+    for (int ai = 0; asm_arch_table[ai].prefix != NULL; ai++) {
+        if (strcmp(arch_tok.value, asm_arch_table[ai].prefix) == 0) {
+            asm_component = asm_arch_table[ai].triple_component;
+            break;
+        }
+    }
+
+    if (asm_component == NULL) {
+        printf("Error [line %d, col %d]: unknown keyword or asm arch prefix '%s'\n",
+               arch_tok.line, arch_tok.col, arch_tok.value);
+        err();
+        asmnode.type = NODE_ERROR;
+        return asmnode;
+    }
+
+    const char *current_triple = preprocess_get_target();
+    if (current_triple != NULL && current_triple[0] != '\0') {
+        if (!triple_has_component(current_triple, asm_component)) {
+            printf("Error [line %d, col %d]: "
+                   "asm arch '%s' is incompatible with target '%s'\n"
+                   "  Hint: wrap platform-specific asm in "
+                   "#ifdef %s ... #endif\n",
+                   arch_tok.line, arch_tok.col,
+                   arch_tok.value, current_triple,
+                   arch_tok.value);
+            err();
+            asmnode.type = NODE_ERROR;
+            return asmnode;
+        }
+    }
 
     Node arch_node;
     memset(&arch_node, 0, sizeof(Node));
     arch_node.type   = NODE_IDENT;
     arch_node.childs = malloc(sizeof(vector_node));
     vn_init(arch_node.childs, 1);
-    arch_node.str = malloc(8);
-    strcpy(arch_node.str, "x86");
+    arch_node.str = malloc(strlen(arch_tok.value) + 1);
+    strcpy(arch_node.str, arch_tok.value);
     vn_push_back(asmnode.childs, arch_node);
+
+    char instr[256];
+    instr[0] = '\0';
+    int operand_count = 0;
 
     Token mnemonic = advance();
     if (mnemonic.type != TOK_IDENT) {
-        printf("Error: expected instruction mnemonic after 'x86'\n");
+        printf("Error [line %d, col %d]: expected instruction mnemonic after '%s'\n",
+               mnemonic.line, mnemonic.col, arch_tok.value);
         err();
         asmnode.type = NODE_ERROR;
         return asmnode;
