@@ -1,0 +1,36 @@
+#include "string.fl"
+
+#ifdef x86_64 #ifdef linux
+
+func void out(char *msg) {
+    var int len = strlen(msg);
+
+    x86_64 mov rax, 1;
+    x86_64 mov rdi, 1;
+    x86_64 mov rsi, $msg;
+    x86_64 mov rdx, $len;
+    x86_64 syscall;
+}
+func void outln(char *msg) {
+    msg = strcat(msg, "\n");
+    var int len = strlen(msg);
+
+    x86_64 mov rax, 1;
+    x86_64 mov rdi, 1;
+    x86_64 mov rsi, $msg;
+    x86_64 mov rdx, $len;
+    x86_64 syscall;
+}
+func char *in(int len) {
+    var char *buf;
+
+    x86_64 mov rax, 0;
+    x86_64 mov rdi, 0;
+    x86_64 mov rsi, $buf;
+    x86_64 mov rdx, $len;
+    x86_64 syscall;
+
+    return buf;
+}
+
+#endif #endif

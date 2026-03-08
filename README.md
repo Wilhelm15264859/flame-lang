@@ -17,6 +17,7 @@ Full list:
 5 - int;
 5s - short;
 5l - long;
+5c - char;
 
 ## Dependecies:
 llvm, clang
@@ -159,3 +160,4 @@ exception Repeat {
   x86 mov rdx, 5l;
   x86 syscall
   ```
+

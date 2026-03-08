@@ -287,6 +287,14 @@ static void register_alias(AutodelVar *vars, int count, int ai, const char *alia
     }
 }
 
+static int node_is_simple_var_assign(Node *n) {
+    if (n->type != NODE_ASSIGN) return 0;
+    if (n->childs->size < 1) return 0;
+    const char *dest = n->childs->data[0].str;
+    if (!dest || dest[0] == '\0') return 0;
+    return 1;
+}
+
 static void collect_aliases(vector_node *nodes, int start, int end,
                              AutodelVar *vars, int count)
 {
@@ -301,6 +309,7 @@ static void collect_aliases(vector_node *nodes, int start, int end,
                 if (init->type == NODE_VAR && init->str && init->str[0]) {
                     const char *src  = init->str;
                     const char *dest = n->childs->data[1].str;
+                    if (!dest || dest[0] == '\0') continue;
 
                     int ai = find_autodel_by_name(vars, count, src);
                     if (ai < 0) {
@@ -320,11 +329,12 @@ static void collect_aliases(vector_node *nodes, int start, int end,
                 }
             }
 
-            if (n->type == NODE_ASSIGN && n->childs->size >= 3) {
+            if (n->type == NODE_ASSIGN && node_is_simple_var_assign(n) && n->childs->size >= 3) {
                 Node *rhs = &n->childs->data[2];
                 if (rhs->type == NODE_VAR && rhs->str && rhs->str[0]) {
                     const char *src  = rhs->str;
                     const char *dest = n->childs->data[0].str;
+                    if (!dest || dest[0] == '\0') continue;
 
                     int ai = find_autodel_by_name(vars, count, src);
                     if (ai < 0) {
@@ -361,8 +371,6 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
                 Node *child = &n->childs->data[k];
                 if (child->type == NODE_SCOPE && child->childs)
                     pregen_scope(child->childs, 0, (int)child->childs->size);
-                else if (child->type == NODE_VAR_DEF)
-                    pregen_scope(n->childs, (int)k, (int)k + 1);
             }
         } else if (n->type == NODE_IF && n->childs) {
             for (unsigned long long k = 0; k < n->childs->size; k++) {
@@ -412,6 +420,7 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
 
             if (strncmp(type_node->str, "autodel:", 8) == 0) continue;
             if (init_node->type != NODE_VAR) continue;
+            if (!n->childs->data[1].str || n->childs->data[1].str[0] == '\0') continue;
 
             if (find_autodel_by_name(autodel_vars, autodel_count,
                                     init_node->str) >= 0) {
@@ -424,7 +433,7 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
             }
         }
 
-        if (n->type == NODE_ASSIGN && n->childs->size >= 3) {
+        if (n->type == NODE_ASSIGN && node_is_simple_var_assign(n) && n->childs->size >= 3) {
             Node *rhs = &n->childs->data[2];
             if (rhs->type != NODE_VAR) continue;
 
@@ -432,6 +441,8 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
                 continue;
 
             const char *dest = n->childs->data[0].str;
+            if (!dest || dest[0] == '\0') continue;
+
             if (find_autodel_by_name(autodel_vars, autodel_count, dest) < 0) {
                 printf("Error [pregen]: cannot assign autodel variable '%s' "
                     "to non-owning variable '%s'\n",

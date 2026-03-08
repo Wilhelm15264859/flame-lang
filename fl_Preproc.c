@@ -129,8 +129,8 @@ void preprocess_set_target(const char *triple) {
         char *p = buf;
         char *tok;
         while ((tok = strsep(&p, "-")) != NULL)
-            define_push(tok, "1");
-        define_push(triple, "1");
+            define_push(tok, tok);
+        define_push(triple, triple);
     } else {
         g_target[0] = '\0';
     }
@@ -407,7 +407,6 @@ static void preprocess_internal(const char *source, const char *base_dir,
 }
 
 char *preprocess(const char *source, const char *base_dir) {
-    //define_count   = 0;
     included_count = 0;
     if_depth       = 0;
 

@@ -553,7 +553,7 @@ Node *parseExpr(void);
 Node parseStruct(void);
 Node parseAsm(Token arch_tok);
 Node parseClass(void);
-Node parseCompoundAssign(Token t);
+Node parseCompoundAssign(Token t, int f);
 Node parseFor(void);
 Node parseDelete(void);
 Node parseExternFuncDef(void);
@@ -617,13 +617,13 @@ Node parsing(void) {
             return parseMemberCompoundAssign(current);
         else if (strcmp(peek(0).value, "++") == 0 ||
                  strcmp(peek(0).value, "--") == 0)
-            return parseCompoundAssign(current);
+            return parseCompoundAssign(current, 1);
         else if (strcmp(peek(0).value, "+=") == 0 ||
                  strcmp(peek(0).value, "-=") == 0 ||
                  strcmp(peek(0).value, "*=") == 0 ||
                  strcmp(peek(0).value, "/=") == 0 ||
                  strcmp(peek(0).value, "%=") == 0)
-            return parseCompoundAssign(current);
+            return parseCompoundAssign(current, 1);
         else if (strcmp(peek(0).value, "=") == 0 ||
                  strcmp(peek(0).value, "[") == 0 ||
                  strcmp(peek(0).value, ".") == 0 ||
@@ -653,19 +653,16 @@ Node parsing(void) {
     return error;
 }
 
-/* extern "C" func rettype name(...) { ... }
-   Имя не мэнглится, функция видима из Си.
-   Флаг передаётся Builder'у через префикс __extern_c__ в имени. */
 Node parseExternCFuncDef(void) {
-    advance(); /* "C" */
-    advance(); /* func */
+    advance();
+    advance();
 
     Node func;
     func.childs = malloc(sizeof(vector_node));
     vn_init(func.childs, 4);
     func.str = NULL;
 
-    Token current = advance(); /* return type */
+    Token current = advance();
     if (current.type == TOK_TYPE || current.type == TOK_IDENT) {
         char ret_str[80];
         strncpy(ret_str, current.value, 79);
@@ -681,7 +678,7 @@ Node parseExternCFuncDef(void) {
         err();
     }
 
-    current = advance(); /* name */
+    current = advance();
     if (current.type == TOK_IDENT) {
         char tagged[128];
         snprintf(tagged, sizeof(tagged), "__extern_c__%s", current.value);
@@ -693,7 +690,7 @@ Node parseExternCFuncDef(void) {
         err();
     }
 
-    current = advance(); /* ( */
+    current = advance();
     if (strcmp(current.value, "(") == 0) {
         if (strcmp(peek(0).value, ")") == 0) {
             Node *params = make_node(NODE_PARAMS, "");
@@ -713,7 +710,7 @@ Node parseExternCFuncDef(void) {
         err();
     }
 
-    current = advance(); /* { */
+    current = advance();
     if (strcmp(current.value, "{") == 0) {
         Node *scope = make_node(NODE_SCOPE, "");
         while (strcmp(peek(0).value, "}") != 0) {
@@ -730,7 +727,7 @@ Node parseExternCFuncDef(void) {
                 free(tmp);
             }
         }
-        advance(); /* } */
+        advance();
         vn_push_back(func.childs, *scope);
         free(scope);
     } else {
@@ -808,6 +805,10 @@ Node parseExternFuncDef(void) {
     }
 
     if (peek(0).type == TOK_SEMICOLON) advance();
+    else {
+        printf("Error: semicolon expected");
+        err();
+    }
 
     ext.type = NODE_EXTERN_FUNC_DEF;
     return ext;
@@ -853,6 +854,10 @@ Node parseDelete(void) {
     free(var);
 
     if (peek(0).type == TOK_SEMICOLON) advance();
+    else {
+        printf("Error: semicolon expected");
+        err();
+    }
 
     del.type = NODE_DELETE;
     return del;
@@ -935,10 +940,14 @@ Node parseMemberCompoundAssign(Token obj) {
     vn_push_back(assign.childs, *rhs_expr); free(rhs_expr);
 
     if (peek(0).type == TOK_SEMICOLON) advance();
+    else {
+        printf("Error: semicolon expected");
+        err();
+    }
     return assign;
 }
 
-Node parseCompoundAssign(Token t) {
+Node parseCompoundAssign(Token t, int f) {
     Node assign;
     assign.childs = malloc(sizeof(vector_node));
     vn_init(assign.childs, 4);
@@ -982,6 +991,10 @@ Node parseCompoundAssign(Token t) {
     }
 
     if (peek(0).type == TOK_SEMICOLON) advance();
+    else if (f == 1) {
+        printf("Error: semicolon expected");
+        err();
+    }
 
     assign.type = NODE_ASSIGN;
     return assign;
@@ -1052,7 +1065,8 @@ Node parseAsm(Token arch_tok) {
 
     while (peek(0).type != TOK_SEMICOLON &&
            peek(0).type != TOK_EOF &&
-           peek(0).type != TOK_ERROR) {
+           peek(0).type != TOK_ERROR &&
+           !(peek(0).type == TOK_OP && strcmp(peek(0).value, "==>") == 0)) {
         Token op = advance();
         size_t len = strlen(instr);
 
@@ -1079,8 +1093,23 @@ Node parseAsm(Token arch_tok) {
         }
     }
 
+    char out_var[64] = "";
+    if (peek(0).type == TOK_OP && strcmp(peek(0).value, "==>") == 0) {
+        advance();
+        Token out_tok = advance();
+        strncpy(out_var, out_tok.value, 63);
+    }
+    Node out_node;
+    out_node.type = NODE_IDENT;
+    out_node.str = strdup(out_var[0] ? out_var : "");
+    vn_push_back(asmnode.childs, out_node);
+
     if (peek(0).type == TOK_SEMICOLON)
         advance();
+    else {
+        printf("Error: semicolon expected");
+        err();
+    }
 
     strncpy(asmnode.str, instr, 255);
     asmnode.str[255] = '\0';
@@ -1120,6 +1149,10 @@ Node parsePtrAssign(void) {
     }
 
     if (peek(0).type == TOK_SEMICOLON) advance();
+    else {
+        printf("Error: semicolon expected");
+        err();
+    }
 
     assign.type = NODE_PTR_ASSIGN;
     return assign;
@@ -1132,7 +1165,6 @@ vector_node *parse(int it, vector_token* tokenss) {
     known_class_count = 0;
     overload_count   = 0;
 
-    /* Первый проход: собираем все сигнатуры функций и методов */
     prescan(tokenss);
     
     vector_node *nodes = malloc(sizeof(vector_node));
@@ -1163,7 +1195,7 @@ Node parseAssign(Token t) {
         vn_push_back(assign.childs, *ident);
         free(ident);
         
-        advance(); // [
+        advance();
         Node *idx = parseExpr();
         if (idx) {
             vn_push_back(assign.childs, *idx);
@@ -1223,20 +1255,52 @@ Node parseAssign(Token t) {
         assign.type = NODE_ASSIGN;
     }
 
-    if (strcmp(peek(0).value, "=") == 0)
+    if (strcmp(peek(0).value, "=") == 0) {
         advance();
+
+        if (peek(0).type == TOK_KEYWORD && strcmp(peek(0).value, "new") == 0) {
+            advance();
+            Node *new_node = make_node(NODE_NEW, var_type_lookup(t.value));
+            Node *varname_node = make_node(NODE_IDENT, t.value);
+            vn_push_back(new_node->childs, *varname_node);
+            free(varname_node);
+            Node *args = make_node(NODE_ARGS, "");
+            if (strcmp(peek(0).value, "(") == 0) {
+                advance();
+                while (strcmp(peek(0).value, ")") != 0) {
+                    if (peek(0).type == TOK_EOF) break;
+                    Node *arg = parseExpr();
+                    if (arg) {
+                        vn_push_back(args->childs, *arg);
+                        free(arg);
+                    }
+                    if (peek(0).type == TOK_COMMA) advance();
+                    else break;
+                }
+                if (strcmp(peek(0).value, ")") == 0) advance();
+            }
+            vn_push_back(new_node->childs, *args);
+            free(args);
+            vn_push_back(assign.childs, *new_node);
+            free(new_node);
+        } else {
+            Node *expr = parseExpr();
+            if (expr) {
+                vn_push_back(assign.childs, *expr);
+                free(expr);
+            }
+        }
+    }
     else {
         printf("Error: expected '='\n");
         err();
     }
 
-    Node *expr = parseExpr();
-    if (expr) {
-        vn_push_back(assign.childs, *expr);
-        free(expr);
-    }
-
     if (peek(0).type == TOK_SEMICOLON) advance();
+    else {
+        printf("Error: semicolon expected");
+        err();
+    }
 
     return assign;
 }
@@ -1304,17 +1368,13 @@ static Node parseFuncCallInner(Token t, int is_stmt) {
     vn_push_back(call.childs, *args);
     free(args);
 
-    /* --- Резолюция перегрузки ---
-     * Пытаемся подобрать мэнглированное имя по базовому имени и типам аргументов.
-     * Если перегрузок нет — имя остаётся как есть (внешние C-функции, extern). */
     {
-        Node *args_in_call = &call.childs->data[1]; /* NODE_ARGS */
+        Node *args_in_call = &call.childs->data[1];
         const char *resolved = resolve_overload(t.value, args_in_call);
         if (resolved) {
             free(call.str);
             call.str = malloc(strlen(resolved) + 1);
             strcpy(call.str, resolved);
-            /* обновляем NODE_IDENT */
             free(call.childs->data[0].str);
             call.childs->data[0].str = malloc(strlen(resolved) + 1);
             strcpy(call.childs->data[0].str, resolved);
@@ -1322,7 +1382,13 @@ static Node parseFuncCallInner(Token t, int is_stmt) {
         }
     }
 
-    if (is_stmt && peek(0).type == TOK_SEMICOLON) advance();
+    if (is_stmt) {
+        if (peek(0).type == TOK_SEMICOLON) advance();
+        else {
+            printf("Error: semicolon expected");
+            err();
+        }
+    }
 
     call.type = NODE_FUNC_CALL;
     return call;
@@ -1446,6 +1512,10 @@ Node parseDoWhile(void) {
     if (body) { vn_push_back(dowhile.childs, *body); free(body); }
 
     if (peek(0).type == TOK_SEMICOLON) advance();
+    else {
+        printf("Error: semicolon expected");
+        err();
+    }
 
     dowhile.type = NODE_DO_WHILE;
     return dowhile;
@@ -1505,7 +1575,7 @@ Node parseFor(void) {
                 strcmp(peek(0).value, "+=") == 0 || strcmp(peek(0).value, "-=") == 0 ||
                 strcmp(peek(0).value, "*=") == 0 || strcmp(peek(0).value, "/=") == 0 ||
                 strcmp(peek(0).value, "%=") == 0)
-                step = parseCompoundAssign(step_tok);
+                step = parseCompoundAssign(step_tok, 0);
             else if (strcmp(peek(0).value, "=") == 0)
                 step = parseAssign(step_tok);
             else {
@@ -1587,11 +1657,6 @@ Node parseFuncDef(void) {
         printf("Error: expected '(' in function def\n");
         err();
     }
-
-    /* --- Мэнглинг имени функции ---
-     * Базовое имя берём из childs[1], параметры из childs[2].
-     * Мэнглированное имя: '_' + base + '_' + types...
-     * Регистрируем в таблице перегрузок. */
     {
         Node *name_node   = &func.childs->data[1];
         Node *params_node = &func.childs->data[2];
@@ -1620,13 +1685,11 @@ Node parseFuncDef(void) {
             build_mangled_name(base, (const char (*)[64])param_types,
                                param_count, mangled, sizeof(mangled));
 
-        /* Регистрируем перегрузку (ret_type из childs[0]) */
         const char *ret_type_str = func.childs->data[0].str;
         overload_push(base, mangled,
                       (const char (*)[64])param_types, param_count,
                       ret_type_str);
 
-        /* Переименовываем узел */
         free(name_node->str);
         name_node->str = malloc(strlen(mangled) + 1);
         strcpy(name_node->str, mangled);
@@ -1776,7 +1839,7 @@ Node parseVarDef(void) {
         vn_push_back(var.childs, *ident);
         free(ident);
     } else {
-        printf("Error: expected identifier\n");
+        printf("Error: expected identifier, got '%s'\n", current.value);
         err();
     }
 
@@ -1806,6 +1869,8 @@ Node parseVarDef(void) {
         var.type = NODE_ARRAY_DEF;
         return var;
     }
+
+    printf("Type assign: %i, got '%s'\n", peek(0).type, peek(0).value);
 
     if (strcmp(peek(0).value, "=") == 0) {
         advance();
@@ -1996,12 +2061,10 @@ Node parseClass(void) {
             Node *method_name_node = &method.childs->data[1];
             Node *method_params    = &method.childs->data[2];
 
-            /* Базовое имя метода: ClassName_methodName */
             char base_method[128];
-            snprintf(base_method, sizeof(base_method), "%s_%s",
-                     name.value, method_name_node->str);
+            snprintf(base_method, sizeof(base_method), "%s",
+                     name.value);
 
-            /* Собираем типы параметров (без self — он добавляется позже) */
             char param_types[MAX_OVERLOAD_PARAMS][64];
             int  param_count = 0;
             if (method_params->type == NODE_PARAMS) {
@@ -2016,7 +2079,6 @@ Node parseClass(void) {
                 }
             }
 
-            /* Мэнглинг: _ClassName_method_types */
             char mangled_method[128];
             build_mangled_name(base_method,
                                (const char (*)[64])param_types, param_count,
@@ -2277,6 +2339,10 @@ static Node *expr_primary(void) {
         advance();
         size_t len = strlen(t.value);
 
+        if (len > 1 && (t.value[len-1] == 'c' || t.value[len-1] == 'C')) {
+            char buf[64]; strncpy(buf, t.value, len-1); buf[len-1] = '\0';
+            return make_node(NODE_I8, buf);
+        }
         if (len > 1 && (t.value[len-1] == 's' || t.value[len-1] == 'S')) {
             char buf[64]; strncpy(buf, t.value, len-1); buf[len-1] = '\0';
             return make_node(NODE_I16, buf);
@@ -2334,8 +2400,6 @@ static Node *expr_primary(void) {
             strncpy(fake.value, full_name, 63);
 
             Node call = parseFuncCallInner(fake, 0);
-            /* parseFuncCallInner уже провёл резолюцию перегрузки через resolve_overload,
-               поэтому call.str уже содержит мэнглированное имя метода. */
             vector_node *args_node = call.childs->data[1].childs;
 
             vector_node *new_args_childs = malloc(sizeof(vector_node));
@@ -2400,7 +2464,7 @@ static Node *expr_primary(void) {
         return inner;
     }
 
-    printf("Error: unexpected token in expression\n");
+    printf("Error: unexpected token in expression, got '%s'\n", t.value);
     err();
     return NULL;
 }

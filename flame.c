@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <libgen.h>
 
-const char* version = "1.6.0-STABLE";
+const char* version = "2.1.0-STABLE";
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {

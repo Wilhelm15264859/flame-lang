@@ -103,7 +103,30 @@ static Token next_token(Lexer *lex) {
         return tok;
     }
 
-    if (c == '"') {
+    if (c == '\'') {
+        advance(lex);
+        char val = 0;
+        if (peek(lex) == '\\') {
+            advance(lex);
+            char esc = advance(lex);
+            switch (esc) {
+                case 'n':  val = '\n'; break;
+                case 't':  val = '\t'; break;
+                case '0':  val = '\0'; break;
+                case '\\': val = '\\'; break;
+                case '\'': val = '\''; break;
+                case 'r':  val = '\r'; break;
+                default:   val = esc;  break;
+            }
+        } else {
+            val = advance(lex);
+        }
+        if (peek(lex) == '\'') advance(lex);
+        else fprintf(stderr, "Lexer WARNING: unclosed char literal at line %d\n", lex->line);
+        snprintf(tok.value, sizeof(tok.value), "%dc", (unsigned char)val);
+        tok.type = TOK_INT;
+        return tok;
+    } else if (c == '"') {
         advance(lex);
         int i = 0;
         while (peek(lex) && peek(lex) != '"') {
@@ -155,7 +178,8 @@ static Token next_token(Lexer *lex) {
             while (isdigit(peek(lex))) tok.value[i++] = advance(lex);
         }
         if (!is_float && (peek(lex) == 's' || peek(lex) == 'S' ||
-                        peek(lex) == 'l' || peek(lex) == 'L')) {
+                peek(lex) == 'l' || peek(lex) == 'L' ||
+                peek(lex) == 'c' || peek(lex) == 'C')) {
             tok.value[i++] = advance(lex);
         } else if (is_float && (peek(lex) == 'f' || peek(lex) == 'F')) {
             tok.value[i++] = advance(lex);
@@ -204,6 +228,13 @@ static Token next_token(Lexer *lex) {
         tok.value[0] = advance(lex);
         tok.value[1] = '\0';
         tok.type = TOK_COMMA;
+        return tok;
+    }
+
+    if (c == '=' && lex->src[lex->pos+1] == '=' && lex->src[lex->pos+2] == '>') {
+        advance(lex); advance(lex); advance(lex);
+        strcpy(tok.value, "==>");
+        tok.type = TOK_OP;
         return tok;
     }
 
