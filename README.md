@@ -7,9 +7,11 @@ Currently, the file is compiled only into .bc (LLVM Byte Code),
 you need to manually compile it into an object file and link it to make an executable file
 
 ## Working with ASM:
-The `x86` prefix is ​​used for this. For now, x86 is just a prefix for designation, 
-but in the future, it will be used for insertion typing, so that ARM instructions cannot be 
-inserted when compiling to x86. `$` is used for inserting variables.
+The `x86`/`avr`/... prefix is ​​used for this.`$` is used for inserting variables.
+Full list:
+"sparc64", "sparc", "bpf", "msp430", "avr", "wasm64", "wasm32", "ppc64", 
+"ppc", "mips64", "mips", "riscv64", "riscv32",
+"aarch64", "thumbeb", "thumb",  "armeb",  "arm", "i686", "i386", "x86_64"
 
 ## Number typing:
 5 - int;
@@ -17,7 +19,70 @@ inserted when compiling to x86. `$` is used for inserting variables.
 5l - long;
 
 ## Dependecies:
-libc, llvm-config, llc, gcc
+llvm, clang
+
+## Exception structs:
+Exception structures are structures that describe places where exceptions can occur, and describe checks or replacements for dangerous places.
+The possible location is defined in `instruction {}`, and has its own formatting:
+
+`%n` - any number;
+`%k` - any keyword;
+`%s` - any string;
+`%i` - any identifier;
+`Word`/`%"Word"` - any token with this lexeme;
+
+`%n:varName` - becomes `var int varName = *that number*;`;
+`%"(" ^ ")":varName` - becomes `var int varName = (*all in parens*);`;
+`%"(" ^ ")"!k :varName` - the same, but with the assignment being terminated when the `%k` token is encountered;
+
+`checker {}` inserts this code before the instruction where there is an exception.
+`replace {}` replaces the entire instruction, you can write expressions with $ in it:
+
+`$source` - inserts source instruction;
+`$n` - inserts token with index `n` (first token in `instruction {}` have index 0);
+`$ %TOK_INT "5"` - inserts custom token with type `TOK_TYPE` and lexeme `"5"`, full list:
+    TOK_INT,
+    TOK_FLOAT,
+    TOK_STRING,
+    TOK_IDENT,
+    TOK_KEYWORD,
+    TOK_OP,
+    TOK_PAREN,
+    TOK_SEMICOLON,
+    TOK_COMMA,
+    TOK_EOF,
+    TOK_ERROR,
+    TOK_TYPE
+
+### Exemple:
+```Flame
+exception DivByZero {
+  var int op;
+
+  instruction {
+    %n / %:op
+  }
+
+  checker {
+    if (op == 0) {
+        var char *msg = "Error\n\0";
+        Console.out(msg, 7l);
+    }
+  }
+}
+
+exception Repeat {
+  var int count;
+
+  instruction {
+    repeat %n:count
+  }
+
+  replace {
+    for (int i = 0; i < count; i++)
+  }
+}
+```
 
 ## Currently aviable:
 - Function declaration:

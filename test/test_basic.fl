@@ -1,5 +1,47 @@
-#ifdef x86_64
-func int main() {
-    return 0;
+// ===== Тест 1: swap =====
+exception swap_args {
+    instruction { swap %i:a %i:b }
+    replace {
+        var int tmp = a;
+        a = b;
+        b = tmp;
+    }
 }
-#endif
+
+func void panic() {}
+
+func int main() {
+    var int x = 10;
+    var int y = 20;
+    swap x y;
+}
+
+// ===== Тест 2: bounds_check =====
+exception bounds_check {
+    var int idx;
+    instruction { %i:arr [ %n:idx ]; }
+    check {
+        if (idx < 0) {
+            panic();
+        }
+    }
+}
+
+func void test2() {
+    var int arr[5];
+    arr[3] = 0;
+    arr[1] = 0;
+}
+
+// ===== Тест 3: let sugar =====
+exception let_sugar {
+    var int val;
+    instruction { let %i:name = %n:val }
+    replace {
+        $%TOK_KEYWORD "var" $%TOK_TYPE "int" name = val;
+    }
+}
+
+func void test3() {
+    let myVar = 99;
+}

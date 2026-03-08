@@ -16,7 +16,7 @@ const char *KEYWORDSfl[] = {
     "check", "replace", "autodel",
 
     "sparc64", "sparc", "bpf", "msp430", "avr", "wasm64", "wasm32", "ppc64", "ppc", "mips64", "mips", "riscv64", "riscv32",
-    "aarch64", "thumbeb", "thumb",  "armeb",  "arm", "i686", "i386", "x86_64", "x86",
+    "aarch64", "thumbeb", "thumb",  "armeb",  "arm", "i686", "i386", "x86_64",
     ((void*)0)
 };
 
