@@ -13,7 +13,7 @@ const char SINGLE_OPSfl[] = "+-*/%=<>!&|^~?:.#$";
 const char *KEYWORDSfl[] = {
     "var", "func", "return", "struct", "sizeof", "x86", "new", "class", "static",
     "for", "do", "if", "else", "while",  "delete",  "extern", "exception", "instruction", 
-    "check", "replace", "autodel",
+    "check", "replace", "notdel",
 
     "sparc64", "sparc", "bpf", "msp430", "avr", "wasm64", "wasm32", "ppc64", "ppc", "mips64", "mips", "riscv64", "riscv32",
     "aarch64", "thumbeb", "thumb",  "armeb",  "arm", "i686", "i386", "x86_64",

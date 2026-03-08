@@ -11,6 +11,15 @@ static int  autodel_counter      = 0;
 static int  ownership_func_count = 0;
 static char ownership_funcs[MAX_OWNERSHIP_FUNCS][64];
 
+static void err() {
+    long ret;
+    __asm__ __volatile__ (
+        "syscall"
+        : "=a"(ret)
+        : "a"(60), "D"(1)
+    );
+}
+
 static void ownership_func_push(const char *name) {
     for (int i = 0; i < ownership_func_count; i++)
         if (strcmp(ownership_funcs[i], name) == 0) return;
@@ -393,6 +402,44 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
     }
 
     collect_aliases(nodes, start, end, autodel_vars, autodel_count);
+
+    for (int j = start; j < end; j++) {
+        Node *n = &nodes->data[j];
+
+        if (n->type == NODE_VAR_DEF && n->childs->size >= 3) {
+            Node *type_node = &n->childs->data[0];
+            Node *init_node = &n->childs->data[2];
+
+            if (strncmp(type_node->str, "autodel:", 8) == 0) continue;
+            if (init_node->type != NODE_VAR) continue;
+
+            if (find_autodel_by_name(autodel_vars, autodel_count,
+                                    init_node->str) >= 0) {
+                printf("Error [pregen]: cannot assign autodel variable '%s' "
+                    "to non-owning 'notdel' variable '%s' — "
+                    "use autodel or ensure lifetime is safe\n",
+                    init_node->str,
+                    n->childs->data[1].str);
+                err();
+            }
+        }
+
+        if (n->type == NODE_ASSIGN && n->childs->size >= 3) {
+            Node *rhs = &n->childs->data[2];
+            if (rhs->type != NODE_VAR) continue;
+
+            if (find_autodel_by_name(autodel_vars, autodel_count, rhs->str) < 0)
+                continue;
+
+            const char *dest = n->childs->data[0].str;
+            if (find_autodel_by_name(autodel_vars, autodel_count, dest) < 0) {
+                printf("Error [pregen]: cannot assign autodel variable '%s' "
+                    "to non-owning variable '%s'\n",
+                    rhs->str, dest);
+                err();
+            }
+        }
+    }
 
     for (int j = start; j < end; j++) {
         Node *n = &nodes->data[j];

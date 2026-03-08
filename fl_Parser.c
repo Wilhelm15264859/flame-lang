@@ -1729,9 +1729,9 @@ Node parseVarDef(void) {
 
     Token current = advance();
 
-    int is_autodel = 0;
-    if (current.type == TOK_KEYWORD && strcmp(current.value, "autodel") == 0) {
-        is_autodel = 1;
+    int is_autodel = 1;
+    if (current.type == TOK_KEYWORD && strcmp(current.value, "notdel") == 0) {
+        is_autodel = 0;
         current = advance();
     }
 
