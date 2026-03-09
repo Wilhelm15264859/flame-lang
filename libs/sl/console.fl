@@ -2,8 +2,8 @@
 
 #ifdef x86_64 #ifdef linux
 
-func void out(char *msg) {
-    var int len = strlen(msg);
+void out(char *msg) {
+    int len = strlen(msg);
 
     x86_64 mov rax, 1;
     x86_64 mov rdi, 1;
@@ -11,9 +11,9 @@ func void out(char *msg) {
     x86_64 mov rdx, $len;
     x86_64 syscall;
 }
-func void outln(char *msg) {
+void outln(char *msg) {
     msg = strcat(msg, "\n");
-    var int len = strlen(msg);
+    int len = strlen(msg);
 
     x86_64 mov rax, 1;
     x86_64 mov rdi, 1;
@@ -21,8 +21,8 @@ func void outln(char *msg) {
     x86_64 mov rdx, $len;
     x86_64 syscall;
 }
-func char *in(int len) {
-    var char *buf;
+char *in(int len) {
+    char *buf;
 
     x86_64 mov rax, 0;
     x86_64 mov rdi, 0;

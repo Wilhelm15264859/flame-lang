@@ -1,7 +1,7 @@
 #ifdef x86_64 #ifdef linux
 
-func int open(char *path, int flags) {
-    var int fd;
+int open(char *path, int flags) {
+    int fd;
 
     x86_64 mov rax, 2;
     x86_64 mov rdi, $path;
@@ -11,8 +11,8 @@ func int open(char *path, int flags) {
 
     return fd;
 }
-func char *read(int fd, int len) {
-    var char *buf = malloc(len);
+char *read(int fd, int len) {
+    char *buf = malloc(len);
 
     x86_64 mov rax, 0;
     x86_64 mov rdi, $fd;
@@ -22,12 +22,12 @@ func char *read(int fd, int len) {
 
     return buf;
 }
-func void close(int fd) {
+void close(int fd) {
     x86_64 mov rax, 3;
     x86_64 mov rdi, $fd;
     x86_64 syscall;
 }
-func void write( int len, int fd, char *str) {
+void write( int len, int fd, char *str) {
     x86_64 mov rax, 1;
     x86_64 mov rdi, $fd;
     x86_64 mov rsi, $str;
