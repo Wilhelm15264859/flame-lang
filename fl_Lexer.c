@@ -11,7 +11,7 @@ const char *TWO_CHAR_OPSfl[] = {
 const char SINGLE_OPSfl[] = "+-*/%=<>!&|^~?:.#$";
 
 const char *KEYWORDSfl[] = {
-    "var", "func", "return", "struct", "sizeof", "x86", "new", "class", "static",
+    "return", "struct", "sizeof", "x86", "new", "class", "static",
     "for", "do", "if", "else", "while",  "delete",  "extern", "exception", "instruction", 
     "check", "replace", "notdel",
 
@@ -21,7 +21,7 @@ const char *KEYWORDSfl[] = {
 };
 
 const char *TYPESfl[] = {
-    "int", "short", "long", "char", "float", "double", ((void*)0), "void",
+    "int", "short", "long", "char", "float", "double", "void", ((void*)0)
 };
 
 static int is_keyword(const char *s) {

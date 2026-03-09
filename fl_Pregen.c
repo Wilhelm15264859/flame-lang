@@ -20,6 +20,131 @@ static void err() {
     );
 }
 
+static int has_inline_new(Node *n) {
+    if (!n) return 0;
+    if (n->type == NODE_NEW) return 1;
+    if (n->childs)
+        for (unsigned long long j = 0; j < n->childs->size; j++)
+            if (has_inline_new(&n->childs->data[j])) return 1;
+    return 0;
+}
+
+static Node *make_node(NodeType type, const char *str) {
+    Node *n = malloc(sizeof(Node));
+    n->type   = type;
+    n->childs = malloc(sizeof(vector_node));
+    vn_init(n->childs, 2);
+    if (str) {
+        n->str = malloc(strlen(str) + 1);
+        strcpy(n->str, str);
+    } else {
+        n->str    = malloc(1);
+        n->str[0] = '\0';
+    }
+    return n;
+}
+
+static void vn_insert_at(vector_node *nodes, int pos, Node n) {
+    vn_push_back(nodes, n);
+    for (int j = (int)nodes->size - 1; j > pos; j--)
+        nodes->data[j] = nodes->data[j - 1];
+    nodes->data[pos] = n;
+}
+
+static Node *make_autodel_tempvar(const char *tmp_name, const char *class_name, Node *new_node) {
+    Node *var = make_node(NODE_VAR_DEF, "");
+    
+    char type_str[80];
+    snprintf(type_str, sizeof(type_str), "autodel:%s*", class_name);
+    Node *type  = make_node(NODE_TYPE,  type_str);
+    Node *ident = make_node(NODE_IDENT, tmp_name);
+    
+    vn_push_back(var->childs, *type);     free(type);
+    vn_push_back(var->childs, *ident);    free(ident);
+    vn_push_back(var->childs, *new_node);
+    
+    var->type = NODE_VAR_DEF;
+    return var;
+}
+
+static void replace_inline_new(Node *n, 
+                                char tmp_names[64][64],
+                                Node *new_nodes[64],
+                                int *count)
+{
+    if (!n || !n->childs) return;
+    for (unsigned long long j = 0; j < n->childs->size; j++) {
+        Node *child = &n->childs->data[j];
+        if (child->type == NODE_NEW) {
+            char tmp_name[64];
+            snprintf(tmp_name, sizeof(tmp_name), "__inew_%d", autodel_counter++);
+            
+            Node *new_copy = malloc(sizeof(Node));
+            *new_copy = *child;
+            new_nodes[*count] = new_copy;
+            strncpy(tmp_names[*count], tmp_name, 63);
+            (*count)++;
+            
+            free(child->str);
+            child->str   = malloc(strlen(tmp_name) + 1);
+            strcpy(child->str, tmp_name);
+            child->type  = NODE_VAR;
+            child->childs = malloc(sizeof(vector_node));
+            vn_init(child->childs, 1);
+        } else {
+            replace_inline_new(child, tmp_names, new_nodes, count);
+        }
+    }
+}
+
+static void pregen_inline_new(vector_node *nodes, int start, int end) {
+    for (int j = start; j < end; j++) {
+        Node *n = &nodes->data[j];
+        
+        if (n->type == NODE_SCOPE) {
+            pregen_inline_new(n->childs, 0, (int)n->childs->size);
+            continue;
+        }
+        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF)
+             && n->childs->size >= 4) {
+            Node *scope = &n->childs->data[3];
+            if (scope->type == NODE_SCOPE)
+                pregen_inline_new(scope->childs, 0, (int)scope->childs->size);
+            continue;
+        }
+        if ((n->type == NODE_IF    || n->type == NODE_WHILE ||
+             n->type == NODE_FOR   || n->type == NODE_DO_WHILE) && n->childs) {
+            for (unsigned long long k = 0; k < n->childs->size; k++) {
+                Node *child = &n->childs->data[k];
+                if (child->type == NODE_SCOPE && child->childs)
+                    pregen_inline_new(child->childs, 0, (int)child->childs->size);
+            }
+            continue;
+        }
+
+        if (n->type != NODE_FUNC_CALL) continue;
+        if (!has_inline_new(n)) continue;
+
+        char tmp_names[64][64];
+        Node *new_nodes[64];
+        int   count = 0;
+        memset(tmp_names, 0, sizeof(tmp_names));
+        memset(new_nodes, 0, sizeof(new_nodes));
+
+        replace_inline_new(n, tmp_names, new_nodes, &count);
+        if (count == 0) continue;
+
+        for (int k = count - 1; k >= 0; k--) {
+            const char *class_name = new_nodes[k]->str;
+            Node *tmpvar = make_autodel_tempvar(tmp_names[k], class_name, new_nodes[k]);
+            vn_insert_at(nodes, j, *tmpvar);
+            free(tmpvar);
+            end++;
+            j++;
+        }
+    }
+}
+
 static void ownership_func_push(const char *name) {
     for (int i = 0; i < ownership_func_count; i++)
         if (strcmp(ownership_funcs[i], name) == 0) return;
@@ -40,21 +165,6 @@ typedef struct {
     char aliases[MAX_ALIASES][64];
     int  alias_count;
 } AutodelVar;
-
-static Node *make_node(NodeType type, const char *str) {
-    Node *n = malloc(sizeof(Node));
-    n->type   = type;
-    n->childs = malloc(sizeof(vector_node));
-    vn_init(n->childs, 2);
-    if (str) {
-        n->str = malloc(strlen(str) + 1);
-        strcpy(n->str, str);
-    } else {
-        n->str    = malloc(1);
-        n->str[0] = '\0';
-    }
-    return n;
-}
 
 static int node_uses_var(Node *n, const char *name) {
     if (!n) return 0;
@@ -110,13 +220,6 @@ static Node make_return_var_node(const char *tmp_name) {
     Node *var = make_node(NODE_VAR, tmp_name);
     vn_push_back(ret.childs, *var); free(var);
     return ret;
-}
-
-static void vn_insert_at(vector_node *nodes, int pos, Node n) {
-    vn_push_back(nodes, n);
-    for (int j = (int)nodes->size - 1; j > pos; j--)
-        nodes->data[j] = nodes->data[j - 1];
-    nodes->data[pos] = n;
 }
 
 static int node_is_block(Node *n) {
@@ -358,6 +461,9 @@ static void collect_aliases(vector_node *nodes, int start, int end,
 }
 
 static void pregen_scope(vector_node *nodes, int start, int end) {
+    pregen_inline_new(nodes, start, end);
+    end = (int)nodes->size;
+
     for (int j = start; j < end; j++) {
         Node *n = &nodes->data[j];
         if (n->type == NODE_FUNC_DEF && n->childs->size >= 4) {
@@ -520,6 +626,8 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
 void pregen(vector_node *nodes) {
     autodel_counter      = 0;
     ownership_func_count = 0;
+
+    pregen_inline_new(nodes, 0, (int)nodes->size);
 
     int prev = -1;
     while (prev != ownership_func_count) {

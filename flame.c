@@ -36,7 +36,10 @@ int main(int argc, char *argv[]) {
         const char *target     = NULL;
 
         for (int i = 3; i < argc; i++) {
-            if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
+            if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+                strncat(link_flags, " ",      sizeof(link_flags) - strlen(link_flags) - 1);
+                strncat(link_flags, argv[++i], sizeof(link_flags) - strlen(link_flags) - 1);
+            } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
                 strncat(link_flags, " -l",    sizeof(link_flags) - strlen(link_flags) - 1);
                 strncat(link_flags, argv[++i], sizeof(link_flags) - strlen(link_flags) - 1);
             } else if (strncmp(argv[i], "-l", 2) == 0) {

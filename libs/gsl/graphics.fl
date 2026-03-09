@@ -1,0 +1,84 @@
+#define eNONE 0
+#define eQUIT 1
+
+struct Instance {}
+struct Surface {}
+struct Window {}
+
+class Vertex {
+    int position[2];
+    char color[4];
+
+    new(int x, int y, char r, char g, char b, char a) {
+        self->position[0] = x;
+        self->position[1] = y;
+
+        self->color[0] = r;
+        self->color[1] = g;
+        self->color[2] = b;
+        self->color[3] = a;
+    }
+}
+
+class Shape {
+    Vertex *vertices;
+    int verticesCount;
+    int size[2];
+    int position[2];
+    char color[4];
+
+    new(int x, int y, int w, int h, char r, char g, char b, char a) {
+        self->position[0] = x;
+        self->position[1] = y;
+        self->size[0] = w;
+        self->size[1] = h;
+        self->color[0] = r;
+        self->color[1] = g;
+        self->color[2] = b;
+        self->color[3] = a;
+    }
+}
+
+extern "C" void createVertexBuffer(Vertex *vertices, int size);
+extern "C" void graphicInit(Window *win);
+extern "C" void drawFrame();
+extern "C" int appEvent();
+extern "C" Window *openWindow(char *title, int w, int h);
+extern "C" void closeWindow(Window *win);
+extern "C" void destroyVertexBuffer();
+
+void drawShape(Shape *s) {
+    int x = s->position[0];
+    int y = s->position[1];
+    int w = s->size[0];
+    int h = s->size[1];
+    char r = s->color[0];
+    char g = s->color[1];
+    char b = s->color[2];
+    char a = s->color[3];
+
+    notdel Vertex vertices[6];
+
+    Vertex *v0 = new(x,     y,     r, g, b, a);
+    Vertex *v1 = new(x + w, y,     r, g, b, a);
+    Vertex *v2 = new(x + w, y + h, r, g, b, a);
+    Vertex *v3 = new(x,     y,     r, g, b, a);
+    Vertex *v4 = new(x + w, y + h, r, g, b, a);
+    Vertex *v5 = new(x,     y + h, r, g, b, a);
+
+    vertices[0] = *v0;
+    vertices[1] = *v1;
+    vertices[2] = *v2;
+    vertices[3] = *v3;
+    vertices[4] = *v4;
+    vertices[5] = *v5;
+
+    destroyVertexBuffer();
+    createVertexBuffer(vertices, 72);
+}
+
+void drawVertices(Vertex *vertices, int count) {
+    int size = count * 12;
+    destroyVertexBuffer();
+    createVertexBuffer(vertices, size);
+}

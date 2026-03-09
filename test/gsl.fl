@@ -1,0 +1,35 @@
+#include "../libs/gsl/graphics.fl"
+
+int main() {
+    Window *win = openWindow("First", 600, 800);
+    graphicInit(win);
+
+    notdel Vertex vertices[3];
+
+    vertices[0] = new(
+        0, 100,
+        255, 0, 0, 255
+    ) Vertex;
+
+    vertices[1] = new(
+        100, 0,
+        0, 255, 0, 255
+    ) Vertex;
+
+    vertices[2] = new(
+        -100, 0,
+        0, 0, 255, 255
+    ) Vertex;
+
+    while (1) {
+        int e = appEvent();
+        if (e == eQUIT) {
+            closeWindow(win);
+            return 0;
+        }
+        drawVertices(vertices, 3);
+        drawFrame();
+    }
+
+    return 0;
+}

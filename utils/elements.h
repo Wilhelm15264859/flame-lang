@@ -51,7 +51,8 @@ typedef enum {
     NODE_DO_WHILE,
     NODE_DELETE,
     NODE_EXTERN_FUNC_DEF,
-    NODE_ADDR_INDEX
+    NODE_ADDR_INDEX,
+    NODE_MEMBER_INDEX_ASSIGN
 } NodeType;
 
 typedef struct Node {
