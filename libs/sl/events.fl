@@ -1,9 +1,0 @@
-#ifdef x86_64 #ifdef linux
-
-void exit(int c) {
-    x86_64 mov rax, 60;
-    x86_64 mov rdi, $c;
-    x86_64 syscall
-}
-
-#endif #endif

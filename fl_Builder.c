@@ -33,6 +33,7 @@ typedef struct {
     char        field_names[64][64];
     LLVMTypeRef field_types[64];
     char        field_type_names[64][64];
+    LLVMTypeRef field_fn_sigs[64]; /* non-NULL если поле — F<> указатель */
     int         field_count;
     char        parent_name[64];
 } StructInfo;
@@ -186,6 +187,17 @@ static int type_is_float(LLVMTypeRef t) {
            t == LLVMDoubleTypeInContext(ctx);
 }
 
+/* Returns 1 if name is a primitive (non-struct) type */
+static int is_primitive_type(const char *name) {
+    return strcmp(name, "int")    == 0 ||
+           strcmp(name, "short")  == 0 ||
+           strcmp(name, "long")   == 0 ||
+           strcmp(name, "char")   == 0 ||
+           strcmp(name, "float")  == 0 ||
+           strcmp(name, "double") == 0;
+}
+
+
 static LLVMValueRef coerce_to(LLVMValueRef val, LLVMTypeRef target) {
     if (!val || !target) return val;
     LLVMTypeRef src = LLVMTypeOf(val);
@@ -224,6 +236,18 @@ static LLVMValueRef coerce_to(LLVMValueRef val, LLVMTypeRef target) {
 }
 
 static LLVMValueRef codegen_node(Node *n);
+
+/* If new(val) is used with a primitive type, store val after malloc */
+static void codegen_new_primitive_init(LLVMValueRef ptr,
+                                        LLVMTypeRef  elem_t,
+                                        Node        *args_node)
+{
+    if (!args_node || args_node->childs->size == 0) return;
+    LLVMValueRef val = codegen_node(&args_node->childs->data[0]);
+    if (!val) return;
+    val = coerce_to(val, elem_t);
+    LLVMBuildStore(builder, val, ptr);
+}
 
 static LLVMValueRef codegen_var(Node *n) {
     Symbol *s = sym_lookup(n->str);
@@ -591,10 +615,13 @@ static LLVMValueRef codegen_array_def(Node *n) {
     return ptr;
 }
 
+static LLVMTypeRef last_loaded_fn_sig = NULL;
 
 static LLVMValueRef codegen_func_call(Node *n) {
     const char *fname = n->str;
     Symbol     *s     = sym_lookup(fname);
+
+    last_loaded_fn_sig = NULL; /* сбрасываем перед вычислением аргументов */
 
     if (s && s->fn_type) {
         LLVMValueRef fn_ptr = LLVMBuildLoad2(builder,
@@ -638,6 +665,40 @@ static LLVMValueRef codegen_func_call(Node *n) {
     } else {
         func = LLVMGetNamedFunction(mod, fname);
         if (!func) {
+            /* Последний шанс: fname мог быть результатом member_arrow/dot,
+               тогда last_loaded_fn_sig содержит сигнатуру функции, а
+               значение уже вычислено и лежит в args[0] через expr. */
+            if (last_loaded_fn_sig) {
+                /* Значение fn_ptr нужно получить через codegen_var */
+                Symbol *fs = sym_lookup(fname);
+                LLVMValueRef fn_ptr_val = NULL;
+                if (fs)
+                    fn_ptr_val = LLVMBuildLoad2(builder,
+                        LLVMPointerType(last_loaded_fn_sig, 0), fs->value, "fptr_m");
+                if (!fn_ptr_val) {
+                    fprintf(stderr, "codegen error: undefined function '%s'\n", fname);
+                    err();
+                    return NULL;
+                }
+                LLVMTypeRef  sig   = last_loaded_fn_sig;
+                LLVMTypeRef  ptypes[64];
+                unsigned     pcnt  = LLVMCountParamTypes(sig);
+                if (pcnt > 0 && pcnt <= 64) LLVMGetParamTypes(sig, ptypes);
+                LLVMValueRef cargs[64];
+                unsigned     cargc = 0;
+                if (n->childs->size >= 2) {
+                    Node *an = &n->childs->data[1];
+                    for (unsigned long long j = 0; j < an->childs->size && cargc < 64; j++) {
+                        LLVMValueRef a = codegen_node(&an->childs->data[j]);
+                        if (a) {
+                            if (cargc < pcnt) a = coerce_to(a, ptypes[cargc]);
+                            cargs[cargc++] = a;
+                        }
+                    }
+                }
+                int rv = LLVMGetTypeKind(LLVMGetReturnType(sig)) == LLVMVoidTypeKind;
+                return LLVMBuildCall2(builder, sig, fn_ptr_val, cargs, cargc, rv ? "" : "fcall_m");
+            }
             fprintf(stderr, "codegen error: undefined function '%s'\n", fname);
             err();
             return NULL;
@@ -999,10 +1060,16 @@ static LLVMValueRef codegen_struct_def(Node *n) {
 
         if (child->type == NODE_ARRAY_DEF && child->childs->size >= 3) {
             int arr_size = atoi(child->childs->data[2].str);
-            LLVMTypeRef elem = llvm_type_from_str(ftype_str);
+            LLVMTypeRef fn_sig_elem = parse_ftype_str(ftype_str);
+            LLVMTypeRef elem = fn_sig_elem
+                ? LLVMPointerType(fn_sig_elem, 0)
+                : llvm_type_from_str(ftype_str);
             field_types[field_count] = LLVMArrayType(elem, (unsigned)arr_size);
         } else {
-            field_types[field_count] = llvm_type_from_str(ftype_str);
+            LLVMTypeRef fn_sig_f = parse_ftype_str(ftype_str);
+            field_types[field_count] = fn_sig_f
+                ? LLVMPointerType(fn_sig_f, 0)
+                : llvm_type_from_str(ftype_str);
         }
 
         if (child->childs->size >= 2 && child->childs->data[1].type == NODE_IDENT) {
@@ -1041,7 +1108,8 @@ static LLVMValueRef codegen_struct_def(Node *n) {
     for (unsigned i = 0; i < field_count; i++) {
         strncpy(si->field_names[i],      field_names[i],          63);
         strncpy(si->field_type_names[i], tmp_field_type_names[i], 63);
-        si->field_types[i] = field_types[i];
+        si->field_types[i]   = field_types[i];
+        si->field_fn_sigs[i] = parse_ftype_str(tmp_field_type_names[i]);
     }
 
     for (unsigned j = 0; j < (unsigned)n->childs->size; j++) {
@@ -1052,7 +1120,10 @@ static LLVMValueRef codegen_struct_def(Node *n) {
         const char *field_name     = child->childs->data[1].str;
         char global_name[128];
         snprintf(global_name, sizeof(global_name), "%s_%s", n->str, field_name);
-        LLVMTypeRef  gtype = llvm_type_from_str(field_type_str);
+        LLVMTypeRef fn_sig_g = parse_ftype_str(field_type_str);
+        LLVMTypeRef  gtype = fn_sig_g
+            ? LLVMPointerType(fn_sig_g, 0)
+            : llvm_type_from_str(field_type_str);
         LLVMValueRef gvar  = LLVMAddGlobal(mod, gtype, global_name);
         LLVMSetInitializer(gvar, LLVMConstNull(gtype));
         sym_push(global_name, gvar, gtype, 0);
@@ -1088,6 +1159,14 @@ static void codegen_new(Node *n, LLVMValueRef var_ptr, LLVMTypeRef elem_type) {
     size_val = coerce_to(size_val, malloc_param[0]);
     LLVMValueRef ptr = LLVMBuildCall2(builder, malloc_type, malloc_fn, &size_val, 1, "newptr");
     LLVMBuildStore(builder, ptr, var_ptr);
+
+    /* Primitive init: int *x = new(5)  =>  *x = 5 */
+    if (is_primitive_type(n->str)) {
+        Node *args_node = &n->childs->data[1];
+        codegen_new_primitive_init(ptr, elem_type, args_node);
+        return;
+    }
+
     char init_prefix[128];
     snprintf(init_prefix, sizeof(init_prefix), "_%s_new_", n->str);
     LLVMValueRef init_fn = NULL;
@@ -1322,6 +1401,15 @@ static LLVMValueRef codegen_var_def(Node *n) {
     return NULL;
 }
 
+static LLVMTypeRef get_field_fn_sig(LLVMTypeRef struct_type, int field_index) {
+    for (int si = 0; si < struct_info_count; si++) {
+        if (struct_info[si].type == struct_type &&
+            field_index < struct_info[si].field_count)
+            return struct_info[si].field_fn_sigs[field_index];
+    }
+    return NULL;
+}
+
 static LLVMValueRef codegen_member_dot(Node *n) {
     if (n->childs->size < 1) return NULL;
     Node *left = &n->childs->data[0];
@@ -1349,6 +1437,7 @@ static LLVMValueRef codegen_member_dot(Node *n) {
     };
     LLVMValueRef field_ptr  = LLVMBuildGEP2(builder, struct_type, s->value, indices, 2, "gep");
     LLVMTypeRef  field_type = LLVMStructGetTypeAtIndex(struct_type, field_index);
+    last_loaded_fn_sig = get_field_fn_sig(struct_type, field_index);
     return LLVMBuildLoad2(builder, field_type, field_ptr, n->str);
 }
 
@@ -1372,6 +1461,7 @@ static LLVMValueRef codegen_member_arrow(Node *n) {
     };
     LLVMValueRef field_ptr  = LLVMBuildGEP2(builder, struct_type, ptr, indices, 2, "gep");
     LLVMTypeRef  field_type = LLVMStructGetTypeAtIndex(struct_type, field_index);
+    last_loaded_fn_sig = get_field_fn_sig(struct_type, field_index);
     return LLVMBuildLoad2(builder, field_type, field_ptr, n->str);
 }
 
@@ -1775,6 +1865,21 @@ static LLVMValueRef codegen_delete(Node *n) {
         }
     }
 
+    /* Guard: if (ptr != null) — используем LLVMConstPointerNull для сравнения */
+    LLVMTypeRef  ptr_t      = LLVMPointerTypeInContext(ctx, 0);
+    LLVMValueRef null_ptr   = LLVMConstPointerNull(ptr_t);
+    LLVMValueRef is_nonzero = LLVMBuildICmp(builder, LLVMIntNE, ptr, null_ptr, "del_nonzero");
+
+    LLVMBasicBlockRef cur_bb   = LLVMGetInsertBlock(builder);
+    LLVMValueRef      cur_fn   = LLVMGetBasicBlockParent(cur_bb);
+    LLVMBasicBlockRef then_bb  = LLVMAppendBasicBlockInContext(ctx, cur_fn, "del_then");
+    LLVMBasicBlockRef merge_bb = LLVMAppendBasicBlockInContext(ctx, cur_fn, "del_merge");
+
+    LLVMBuildCondBr(builder, is_nonzero, then_bb, merge_bb);
+
+    /* --- then: ptr != 0, вызываем деструктор + free + обнуляем --- */
+    LLVMPositionBuilderAtEnd(builder, then_bb);
+
     if (dtor) {
         LLVMTypeRef  dtor_type        = LLVMGlobalGetValueType(dtor);
         LLVMTypeRef  dtor_param_types[65];
@@ -1799,7 +1904,13 @@ static LLVMValueRef codegen_delete(Node *n) {
     LLVMTypeRef  free_type = LLVMGlobalGetValueType(free_fn);
     LLVMBuildCall2(builder, free_type, free_fn, &ptr, 1, "");
 
-    LLVMBuildStore(builder, LLVMConstNull(LLVMPointerTypeInContext(ctx, 0)), ptr_slot);
+    if (ptr_slot)
+        LLVMBuildStore(builder, LLVMConstNull(LLVMPointerTypeInContext(ctx, 0)), ptr_slot);
+
+    LLVMBuildBr(builder, merge_bb);
+
+    /* --- merge: продолжаем после проверки --- */
+    LLVMPositionBuilderAtEnd(builder, merge_bb);
 
     return NULL;
 }
@@ -2031,6 +2142,13 @@ static LLVMValueRef codegen_new_expr(Node *n) {
     size_val = coerce_to(size_val, malloc_param[0]);
     LLVMValueRef ptr = LLVMBuildCall2(builder, malloc_type, malloc_fn,
                                        &size_val, 1, "newptr");
+
+    /* Primitive init: int *x = new(5)  =>  *x = 5 */
+    if (is_primitive_type(class_name)) {
+        Node *args_node = &n->childs->data[1];
+        codegen_new_primitive_init(ptr, elem_type, args_node);
+        return ptr;
+    }
 
     char init_prefix[128];
     snprintf(init_prefix, sizeof(init_prefix), "_%s_new_", n->str);
