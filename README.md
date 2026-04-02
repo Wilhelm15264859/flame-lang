@@ -89,7 +89,7 @@ exception Repeat {
 - Function declaration:
 
   ```Flame
-  func int main() {
+  int main() {
     ...
   }
   ```
@@ -97,7 +97,7 @@ exception Repeat {
 - Return function:
 
   ```Flame
-  func int main() {
+  int main() {
     return 0;
   }
   ```
@@ -105,13 +105,13 @@ exception Repeat {
 - Variable declaration:
 
   ```Flame
-  var int a = 5;
+  int a = 5;
   ```
 
 - Array declaration:
 
   ```Flame
-  var int a[10];
+  int a[10];
   ```
 
 - while:
@@ -139,15 +139,15 @@ exception Repeat {
 
   ```Flame
   class cls {
-    var int a;
-    func void b() {
+    int a;
+    void b() {
       ...
     }
   }
 
   struct str {
-    var int a;
-    var int b;
+    int a;
+    int b;
   }
   ```
 

@@ -501,6 +501,7 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
         if (n->type != NODE_VAR_DEF || n->childs->size < 2) continue;
         const char *type_str = n->childs->data[0].str;
         if (strncmp(type_str, "autodel:", 8) != 0) continue;
+        if (strncmp(type_str, "const:", 6) != 0) continue;
 
         const char *var_name = n->childs->data[1].str;
         char base[64] = {0};
@@ -525,6 +526,7 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
             Node *init_node = &n->childs->data[2];
 
             if (strncmp(type_node->str, "autodel:", 8) == 0) continue;
+            if (strncmp(type_node->str, "const:", 6) != 0) continue;
             if (init_node->type != NODE_VAR) continue;
             if (!n->childs->data[1].str || n->childs->data[1].str[0] == '\0') continue;
 
@@ -612,6 +614,20 @@ static void pregen_scope(vector_node *nodes, int start, int end) {
                 last = j;
         if (last < 0) continue;
 
+        int already_deleted = 0;
+        for (int jj = last + 1; jj < end; jj++) {
+            Node *nn = &nodes->data[jj];
+            if (nn->type == NODE_DELETE && nn->childs && nn->childs->size >= 2) {
+                Node *vn2 = &nn->childs->data[1];
+                if (vn2->type == NODE_VAR && vn2->str &&
+                    strcmp(vn2->str, name) == 0) {
+                    already_deleted = 1;
+                    break;
+                }
+            }
+        }
+        if (already_deleted) continue;
+
         printf("DEBUG pregen: delete '%s' after index %d (aliases: %d)\n",
                name, last, autodel_vars[ai].alias_count);
         for (int k = 0; k < autodel_vars[ai].alias_count; k++)
@@ -635,6 +651,23 @@ void pregen(vector_node *nodes) {
         collect_ownership(nodes, 0, (int)nodes->size);
         patch_ownership_vardefs(nodes, 0, (int)nodes->size);
     }
-
-    pregen_scope(nodes, 0, (int)nodes->size);
+    for (int j = 0; j < (int)nodes->size; j++) {
+        Node *n = &nodes->data[j];
+        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF)
+             && n->childs->size >= 4) {
+            Node *scope = &n->childs->data[3];
+            if (scope->type == NODE_SCOPE)
+                pregen_scope(scope->childs, 0, (int)scope->childs->size);
+        } else if (n->type == NODE_STRUCT_DEF) {
+            for (unsigned long long k = 0; k < n->childs->size; k++) {
+                Node *child = &n->childs->data[k];
+                if ((child->type == NODE_FUNC_DEF || child->type == NODE_STATIC_FUNC_DEF)
+                     && child->childs->size >= 4) {
+                    Node *scope = &child->childs->data[3];
+                    if (scope->type == NODE_SCOPE)
+                        pregen_scope(scope->childs, 0, (int)scope->childs->size);
+                }
+            }
+        }
+    }
 }

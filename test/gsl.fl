@@ -2,34 +2,28 @@
 
 int main() {
     Window *win = openWindow("First", 600, 800);
-    graphicInit(win);
-
-    notdel Vertex vertices[3];
-
-    vertices[0] = new(
-        0, 100,
+    Shape *s = new(
+        Circle,
+        0, 0,
+        200, 200,
+        255, 255, 0, 255
+    );
+    Shape shapes[1];
+    shapes[0] = *s;
+    Screen *screen = new(
+        &shapes, 1,
         255, 0, 0, 255
-    ) Vertex;
+    );
 
-    vertices[1] = new(
-        100, 0,
-        0, 255, 0, 255
-    ) Vertex;
-
-    vertices[2] = new(
-        -100, 0,
-        0, 0, 255, 255
-    ) Vertex;
+    screen->set();
+    screen->shapes[0].move(500, 0);
+    screen->refresh();
 
     while (1) {
-        int e = appEvent();
-        if (e == eQUIT) {
+        if (appEvent() == Quit) {
             closeWindow(win);
             return 0;
         }
-        drawVertices(vertices, 3);
-        drawFrame();
     }
-
     return 0;
 }

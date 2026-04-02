@@ -1,9 +1,20 @@
-#define eNONE 0
-#define eQUIT 1
+enum Event {
+    None,
+    Quit
+}
+
+enum Form {
+    Square,
+    Circle,
+    Triangle,
+    Island,
+    Rhombus,
+    Pentagon
+}
 
 struct Instance {}
 struct Surface {}
-struct Window {}
+class Window {}
 
 class Vertex {
     int position[2];
@@ -20,14 +31,37 @@ class Vertex {
     }
 }
 
+struct Text {
+    char *txt;
+}
+
+extern "C" void createVertexBuffer(Vertex *vertices, int size);
+extern "C" void setClearColor(int r, int g, int b, int a);
+extern "C" int  getFormVertexCount(int form);
+extern "C" void buildFormVertices(int form, int x, int y, int w, int h,
+                                  int r, int g, int b, int a, Vertex *out);
+extern "C" void destroyVertexBuffer();
+extern "C" void drawFrame();
+
+extern "C" void initTextSystem(char *fontPath, int fontSize);
+extern "C" void shutdownTextSystem();
+extern "C" void measureText(char *txt, int *outW, int *outH);
+extern "C" void queueText(char *txt, int x, int y, int r, int g, int b, int a);
+
 class Shape {
     Vertex *vertices;
     int verticesCount;
     int size[2];
     int position[2];
     char color[4];
+    int form;
+    int type;
+    char *text;
 
-    new(int x, int y, int w, int h, char r, char g, char b, char a) {
+    new(int form, int x, int y, int w, int h, char r, char g, char b, char a) {
+        self->type = 0;
+        self->text = 0;
+        self->form = form;
         self->position[0] = x;
         self->position[1] = y;
         self->size[0] = w;
@@ -36,16 +70,144 @@ class Shape {
         self->color[1] = g;
         self->color[2] = b;
         self->color[3] = a;
+
+        int vc = getFormVertexCount(form);
+        self->verticesCount = vc;
+        self->vertices = malloc(vc * 12);
+        buildFormVertices(form, x, y, w, h, r, g, b, a, self->vertices);
+    }
+
+    new(Vertex *vertices, int count) {
+        self->type = 0;
+        self->text = 0;
+        self->form = -1;
+        self->verticesCount = count;
+        self->vertices = vertices;
+        self->position[0] = 0;
+        self->position[1] = 0;
+        self->size[0] = 0;
+        self->size[1] = 0;
+        self->color[0] = 0;
+        self->color[1] = 0;
+        self->color[2] = 0;
+        self->color[3] = 0;
+    }
+
+    new(char *text, int x, int y, char r, char g, char b, char a) {
+        self->type = 1;
+        self->text = text;
+        self->form = -1;
+        self->vertices = 0;
+        self->verticesCount = 0;
+        self->position[0] = x;
+        self->position[1] = y;
+        self->size[0] = 0;
+        self->size[1] = 0;
+        self->color[0] = r;
+        self->color[1] = g;
+        self->color[2] = b;
+        self->color[3] = a;
+    }
+
+    void move(int x, int y) {
+        self->position[0] = x;
+        self->position[1] = y;
+        buildFormVertices(
+            self->form,
+            x, y,
+            self->size[0], self->size[1],
+            self->color[0], self->color[1], self->color[2], self->color[3],
+            self->vertices
+        );
     }
 }
 
-extern "C" void createVertexBuffer(Vertex *vertices, int size);
-extern "C" void graphicInit(Window *win);
-extern "C" void drawFrame();
+class Screen;
+
+Screen *currentScreen = 0;
+class Screen {
+    Shape *shapes;
+    int shapeCount;
+    int back[4];
+
+    new(Shape *shapes, int count, int r, int g, int b, int a) {
+        self->shapes = shapes;
+        self->shapeCount = count;
+        self->back[0] = r;
+        self->back[1] = g;
+        self->back[2] = b;
+        self->back[3] = a;
+    }
+
+    void set() {
+        currentScreen = self;
+        setClearColor(self->back[0], self->back[1], self->back[2], self->back[3]);
+        destroyVertexBuffer();
+
+        int totalVertices = 0;
+        int i = 0;
+        while (i < self->shapeCount) {
+            notdel Shape *sh = &self->shapes[i];
+            if (sh->type == 0) {
+                totalVertices = totalVertices + sh->verticesCount;
+            }
+            i = i + 1;
+        }
+
+        int totalSize = totalVertices * 12;
+        notdel Vertex allVertices[totalVertices];
+
+        i = 0;
+        int vi = 0;
+        while (i < self->shapeCount) {
+            notdel Shape *sh = &self->shapes[i];
+            if (sh->type == 0) {
+                int j = 0;
+                while (j < sh->verticesCount) {
+                    allVertices[vi] = sh->vertices[j];
+                    vi = vi + 1;
+                    j = j + 1;
+                }
+            }
+            i = i + 1;
+        }
+
+        if (totalVertices > 0) {
+            createVertexBuffer(allVertices, totalSize);
+        }
+
+        i = 0;
+        while (i < self->shapeCount) {
+            notdel Shape *sh = &self->shapes[i];
+            if (sh->type == 1) {
+                if (sh->text != 0) {
+                    queueText(
+                        sh->text,
+                        sh->position[0],
+                        sh->position[1],
+                        sh->color[0],
+                        sh->color[1],
+                        sh->color[2],
+                        sh->color[3]
+                    );
+                }
+            }
+            i = i + 1;
+        }
+
+        drawFrame();
+    }
+
+    void refresh() {
+        if (currentScreen != 0) {
+            self->set();
+        }
+    }
+}
+
 extern "C" int appEvent();
 extern "C" Window *openWindow(char *title, int w, int h);
 extern "C" void closeWindow(Window *win);
-extern "C" void destroyVertexBuffer();
 
 void drawShape(Shape *s) {
     int x = s->position[0];
@@ -81,4 +243,49 @@ void drawVertices(Vertex *vertices, int count) {
     int size = count * 12;
     destroyVertexBuffer();
     createVertexBuffer(vertices, size);
+}
+
+class TextLabel {
+    char *text;
+    int x;
+    int y;
+    char color[4];
+
+    new(char *txt, int x, int y, char r, char g, char b, char a) {
+        self->text = txt;
+        self->x = x;
+        self->y = y;
+        self->color[0] = r;
+        self->color[1] = g;
+        self->color[2] = b;
+        self->color[3] = a;
+    }
+
+    void draw() {
+        queueText(
+            self->text,
+            self->x,
+            self->y,
+            self->color[0],
+            self->color[1],
+            self->color[2],
+            self->color[3]
+        );
+    }
+
+    void move(int nx, int ny) {
+        self->x = nx;
+        self->y = ny;
+    }
+
+    void setColor(char r, char g, char b, char a) {
+        self->color[0] = r;
+        self->color[1] = g;
+        self->color[2] = b;
+        self->color[3] = a;
+    }
+
+    void setText(char *txt) {
+        self->text = txt;
+    }
 }
