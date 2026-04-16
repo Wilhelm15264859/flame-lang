@@ -17,11 +17,16 @@
 /* ── #import: список .o файлов для линковки ── */
 #define MAX_IMPORTS 64
 static char g_import_objects[MAX_IMPORTS][512];
+static const char *g_import_ptrs[MAX_IMPORTS]; /* <-- Добавляем настоящий массив указателей */
 static int  g_import_count = 0;
 
 const char **preprocess_get_imports(int *count) {
     *count = g_import_count;
-    return (const char **)g_import_objects;
+    /* Перед возвратом честно расставляем указатели на начала строк */
+    for (int i = 0; i < g_import_count; i++) {
+        g_import_ptrs[i] = g_import_objects[i];
+    }
+    return g_import_ptrs; /* Возвращаем правильный тип */
 }
 
 static char g_target[256] = "";
@@ -394,9 +399,9 @@ static int preprocess_internal(const char *source, const char *base_dir,
                     /* Строим путь к .fl файлу */
                     char src_path[512];
                     if (base_dir && base_dir[0])
-                        snprintf(src_path, sizeof(src_path), "%s/%s.fl", base_dir, filename);
+                        snprintf(src_path, sizeof(src_path), "%s/%s", base_dir, filename);
                     else
-                        snprintf(src_path, sizeof(src_path), "%s.fl", filename);
+                        snprintf(src_path, sizeof(src_path), "%s", filename);
 
                     /* Объектный файл — рядом с исходником */
                     char obj_path[512];
@@ -413,7 +418,7 @@ static int preprocess_internal(const char *source, const char *base_dir,
                     if (!already) {
                         /* Компилируем импортируемый файл */
                         char cmd[1024];
-                        snprintf(cmd, sizeof(cmd), "flame -c \"%s\"", src_path);
+                        snprintf(cmd, sizeof(cmd), "./flame -c \"%s\"", src_path);
                         int rc2 = system(cmd);
                         if (rc2 != 0)
                             fprintf(stderr, "preprocessor: #import: failed to compile '%s'\n", src_path);

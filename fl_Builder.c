@@ -4,7 +4,9 @@
 #include <llvm-c/BitWriter.h>
 #include <llvm-c/Core.h>
 #include <llvm-c/Target.h>
+#include <llvm-c/Error.h>
 #include <llvm-c/TargetMachine.h>
+#include <llvm-c/Transforms/PassBuilder.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1103,6 +1105,9 @@ static LLVMValueRef codegen_func_def(Node *n) {
   LLVMValueRef func = LLVMAddFunction(mod, fname, func_type);
   if (is_extern_c)
     LLVMSetLinkage(func, LLVMExternalLinkage);
+  else if (strcmp(fname, "main") != 0) {
+    LLVMSetLinkage(func, LLVMInternalLinkage); 
+  }
 
   sym_push(fname, func, func_type, 1);
 
@@ -3101,7 +3106,7 @@ static void init_all_targets(void) {
 }
 
 void codegen(vector_node *nodes, const char *out_file,
-             const char *extra_link_flags, const char *target_triple) {
+             const char *extra_link_flags, const char *target_triple, const char *passes) {
   sym_count = 0;
   type_count = 0;
   struct_info_count = 0;
@@ -3149,15 +3154,21 @@ void codegen(vector_node *nodes, const char *out_file,
   LLVMDisposeMessage(default_triple);
 
   {
-    LLVMTypeRef malloc_params[] = {LLVMInt64TypeInContext(ctx)};
-    LLVMTypeRef malloc_type =
-        LLVMFunctionType(LLVMPointerTypeInContext(ctx, 0), malloc_params, 1, 0);
-    LLVMAddFunction(mod, "malloc", malloc_type);
+    /* Проверяем, нет ли уже malloc */
+    if (!LLVMGetNamedFunction(mod, "malloc")) {
+      LLVMTypeRef malloc_params[] = {LLVMInt64TypeInContext(ctx)};
+      LLVMTypeRef malloc_type =
+          LLVMFunctionType(LLVMPointerTypeInContext(ctx, 0), malloc_params, 1, 0);
+      LLVMAddFunction(mod, "malloc", malloc_type);
+    }
 
-    LLVMTypeRef free_params[] = {LLVMPointerTypeInContext(ctx, 0)};
-    LLVMTypeRef free_type =
-        LLVMFunctionType(LLVMVoidTypeInContext(ctx), free_params, 1, 0);
-    LLVMAddFunction(mod, "free", free_type);
+    /* Проверяем, нет ли уже free */
+    if (!LLVMGetNamedFunction(mod, "free")) {
+      LLVMTypeRef free_params[] = {LLVMPointerTypeInContext(ctx, 0)};
+      LLVMTypeRef free_type =
+          LLVMFunctionType(LLVMVoidTypeInContext(ctx), free_params, 1, 0);
+      LLVMAddFunction(mod, "free", free_type);
+    }
   }
 
   {
@@ -3174,13 +3185,19 @@ void codegen(vector_node *nodes, const char *out_file,
     for (int pi = 0; prims[pi]; pi++) {
       char gname[32];
       snprintf(gname, sizeof(gname), "_T_%s", prims[pi]);
-      LLVMValueRef gvar = LLVMAddGlobal(mod, g_T_struct_type, gname);
-      LLVMValueRef elems[] = {LLVMConstInt(i64, prim_sizes[pi], 0),
-                              LLVMConstInt(i64, djb2(prims[pi]), 0),
-                              LLVMConstNull(ptr), LLVMConstNull(ptr),
-                              LLVMConstNull(ptr)};
-      LLVMSetInitializer(gvar, LLVMConstNamedStruct(g_T_struct_type, elems, 5));
-      LLVMSetGlobalConstant(gvar, 1);
+      
+      LLVMValueRef gvar = LLVMGetNamedGlobal(mod, gname);
+      if (!gvar) {
+        gvar = LLVMAddGlobal(mod, g_T_struct_type, gname);
+        LLVMValueRef elems[] = {LLVMConstInt(i64, prim_sizes[pi], 0),
+                                LLVMConstInt(i64, djb2(prims[pi]), 0),
+                                LLVMConstNull(ptr), LLVMConstNull(ptr),
+                                LLVMConstNull(ptr)};
+        LLVMSetInitializer(gvar, LLVMConstNamedStruct(g_T_struct_type, elems, 5));
+        LLVMSetGlobalConstant(gvar, 1);
+        
+        LLVMSetLinkage(gvar, LLVMLinkOnceAnyLinkage);
+      }
     }
   }
 
@@ -3231,6 +3248,18 @@ void codegen(vector_node *nodes, const char *out_file,
     LLVMDisposeMessage(err_msg);
   }
 
+  LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+  LLVMErrorRef err = LLVMRunPasses(
+    mod, passes, machine, options
+  );
+
+  if (err != LLVMErrorSuccess) {
+    char *msg = LLVMGetErrorMessage(err);
+    printf("codegen: optimization error: %s\n", msg);
+    LLVMDisposeErrorMessage(msg);
+    exit(1);
+  }
+
   char ir_file[256];
   snprintf(ir_file, sizeof(ir_file), "%s.ll", out_file);
   char *ir = LLVMPrintModuleToString(mod);
@@ -3255,29 +3284,34 @@ void codegen(vector_node *nodes, const char *out_file,
   } else {
     fprintf(stderr, "codegen: wrote object '%s'\n", obj_file);
 
-    /* Собираем .o файлы из #import */
-    int import_count = 0;
-    const char **import_objects = preprocess_get_imports(&import_count);
-    char import_flags[2048] = "";
-    for (int ii = 0; ii < import_count; ii++) {
-      strncat(import_flags, " ", sizeof(import_flags) - strlen(import_flags) - 1);
-      strncat(import_flags, import_objects[ii], sizeof(import_flags) - strlen(import_flags) - 1);
-    }
-
-    char cmd[4096];
-    if (target_triple && target_triple[0] != '\0') {
-      snprintf(cmd, sizeof(cmd), "clang --target=%s %s%s -o %s -lc -no-pie %s",
-               target_triple, obj_file, import_flags, out_file,
-               extra_link_flags ? extra_link_flags : "");
+    /* ПРОВЕРКА: Если нет функции main, это библиотека, пропускаем линковку! */
+    if (!LLVMGetNamedFunction(mod, "main")) {
+        fprintf(stderr, "codegen: no 'main' function found, skipping linking (module built as .o).\n");
     } else {
-      snprintf(cmd, sizeof(cmd), "clang %s%s -o %s -lc -no-pie %s", obj_file,
-               import_flags, out_file, extra_link_flags ? extra_link_flags : "");
+        /* Собираем .o файлы из #import */
+        int import_count = 0;
+        const char **import_objects = preprocess_get_imports(&import_count);
+        char import_flags[2048] = "";
+        for (int ii = 0; ii < import_count; ii++) {
+          strncat(import_flags, " ", sizeof(import_flags) - strlen(import_flags) - 1);
+          strncat(import_flags, import_objects[ii], sizeof(import_flags) - strlen(import_flags) - 1);
+        }
+
+        char cmd[4096];
+        if (target_triple && target_triple[0] != '\0') {
+          snprintf(cmd, sizeof(cmd), "clang --target=%s %s%s -o %s -lc -no-pie %s",
+                   target_triple, obj_file, import_flags, out_file,
+                   extra_link_flags ? extra_link_flags : "");
+        } else {
+          snprintf(cmd, sizeof(cmd), "clang %s%s -o %s -lc -no-pie %s", obj_file,
+                   import_flags, out_file, extra_link_flags ? extra_link_flags : "");
+        }
+        int ret = system(cmd);
+        if (ret != 0)
+          fprintf(stderr, "codegen: linker failed (code %d)\n", ret);
+        else
+          fprintf(stderr, "codegen: linked '%s'\n", out_file);
     }
-    int ret = system(cmd);
-    if (ret != 0)
-      fprintf(stderr, "codegen: linker failed (code %d)\n", ret);
-    else
-      fprintf(stderr, "codegen: linked '%s'\n", out_file);
   }
 
   LLVMDisposeTargetData(g_data_layout);

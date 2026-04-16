@@ -12,7 +12,9 @@
 #include <stdlib.h>
 #include <libgen.h>
 
-const char* version = "2.3.0-STABLE";
+const char* version = "1.1";
+
+char pass_list[2048] = "";
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -47,6 +49,20 @@ int main(int argc, char *argv[]) {
                 strncat(link_flags, argv[i],  sizeof(link_flags) - strlen(link_flags) - 1);
             } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
                 target = argv[++i];
+            } else if (strcmp(argv[i], "-p") == 0) {
+                i++; // Переходим к первому проходу
+                int first_pass = 1;
+                
+                // Собираем аргументы, пока не конец и пока следующий аргумент не флаг
+                while (i < argc && argv[i][0] != '-') {
+                    if (!first_pass) {
+                        strncat(pass_list, ",", sizeof(pass_list) - strlen(pass_list) - 1);
+                    }
+                    strncat(pass_list, argv[i], sizeof(pass_list) - strlen(pass_list) - 1);
+                    first_pass = 0;
+                    i++;
+                }
+                i--; // Возвращаемся на шаг назад, чтобы внешний цикл `for` корректно обработал следующий флаг
             } else {
                 printf("Flame language\n\tUnknown flag '%s'\n", argv[i]);
                 return 1;
@@ -116,7 +132,7 @@ int main(int argc, char *argv[]) {
         vt_free(tokens_ready); free(tokens_ready);
 
         pregen(nodes);
-        codegen(nodes, input_file, link_flags, target);
+        codegen(nodes, input_file, link_flags, target, pass_list);
 
         return 0;
     }
