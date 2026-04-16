@@ -54,6 +54,8 @@ typedef enum {
     NODE_ADDR_INDEX,
     NODE_MEMBER_INDEX_ASSIGN,
     NODE_ENUM,
+    NODE_TYPE_LITERAL,
+    NODE_TYPEDEF,
 } NodeType;
 
 typedef struct Node {

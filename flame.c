@@ -68,7 +68,7 @@ int main(int argc, char *argv[]) {
         fseek(file, 0, SEEK_END);
         unsigned long long length = ftell(file);
         fseek(file, 0, SEEK_SET);
-
+        
         char *buffer = malloc(length + 1);
         if (!buffer) {
             fclose(file);

@@ -162,6 +162,10 @@ static int parse_pattern(Token *toks, int len, PatternToken *out) {
 
 vector_token *extract_exceptions(vector_token *tokens) {
     vector_token *result = malloc(sizeof(vector_token));
+    if (!result) {
+        fprintf(stderr, "Error: out of memory in extract_exceptions\n");
+        return NULL;
+    }
     vt_init(result, tokens->size);
 
     unsigned i = 0;
@@ -173,44 +177,52 @@ vector_token *extract_exceptions(vector_token *tokens) {
             if (i >= tokens->size) break;
 
             if (exception_count >= MAX_EXCEPTIONS) {
-                printf("Error: too many exceptions\n");
+                fprintf(stderr, "Error: too many exceptions\n");
                 break;
             }
+            int saved_exception_count = exception_count;
             Exception *ex = &exceptions[exception_count++];
             memset(ex, 0, sizeof(Exception));
             strncpy(ex->name, tokens->data[i].value, 63);
+            ex->name[63] = '\0';
             i++;
 
             if (i >= tokens->size || strcmp(tokens->data[i].value, "{") != 0) {
-                printf("Error: expected '{' after exception name\n");
+                fprintf(stderr, "Error: expected '{' after exception name '%s'\n",
+                        ex->name);
+                exception_count = saved_exception_count;
                 break;
             }
-            i++;
+            i++;  /* пропускаем '{' */
 
+            int parse_error = 0;
             while (i < tokens->size && strcmp(tokens->data[i].value, "}") != 0) {
-                if (tokens->data[i].type == TOK_KEYWORD &&
-                    strcmp(tokens->data[i].value, "var") == 0)
+                /* Поле: TYPE name ;
+                 * Первый токен — тип (TOK_TYPE или TOK_IDENT для struct-типов),
+                 * второй — имя (TOK_IDENT), третий — точка с запятой. */
+                if ((tokens->data[i].type == TOK_TYPE ||
+                     tokens->data[i].type == TOK_IDENT) &&
+                    i + 2 < tokens->size &&
+                    tokens->data[i + 1].type == TOK_IDENT &&
+                    tokens->data[i + 2].type == TOK_SEMICOLON)
                 {
-                    while (i < tokens->size &&
-                           tokens->data[i].type != TOK_SEMICOLON)
-                    {
-                        if (ex->field_count < MAX_FIELDS * 8)
-                            ex->fields[ex->field_count++] = tokens->data[i];
-                        i++;
+                    if (ex->field_count + 2 <= MAX_FIELDS) {
+                        ex->fields[ex->field_count++] = tokens->data[i];     /* тип  */
+                        ex->fields[ex->field_count++] = tokens->data[i + 1]; /* имя  */
+                    } else {
+                        fprintf(stderr, "Error: exception '%s' field table overflow\n",
+                                ex->name);
                     }
-                    if (i < tokens->size) {
-                        if (ex->field_count < MAX_FIELDS * 8)
-                            ex->fields[ex->field_count++] = tokens->data[i];
-                        i++;
-                    }
+                    i += 3; /* пропускаем тип, имя и ';' */
                 }
                 else if (tokens->data[i].type == TOK_KEYWORD &&
                          strcmp(tokens->data[i].value, "instruction") == 0)
                 {
                     i++;
                     if (i >= tokens->size || strcmp(tokens->data[i].value, "{") != 0) {
-                        printf("Error: expected '{' after instruction\n");
-                        break;
+                        fprintf(stderr, "Error: expected '{' after instruction in '%s'\n",
+                                ex->name);
+                        parse_error = 1; break;
                     }
                     i++;
 
@@ -221,6 +233,11 @@ vector_token *extract_exceptions(vector_token *tokens) {
                             pat_toks[pat_len++] = tokens->data[i];
                         i++;
                     }
+                    if (i >= tokens->size) {
+                        fprintf(stderr, "Error: unclosed instruction block in '%s'\n",
+                                ex->name);
+                        parse_error = 1; break;
+                    }
                     i++;
 
                     ex->pattern_len = parse_pattern(pat_toks, pat_len, ex->pattern);
@@ -230,11 +247,15 @@ vector_token *extract_exceptions(vector_token *tokens) {
                 {
                     i++;
                     if (i >= tokens->size || strcmp(tokens->data[i].value, "{") != 0) {
-                        printf("Error: expected '{' after checker\n");
-                        break;
+                        fprintf(stderr, "Error: expected '{' after check in '%s'\n",
+                                ex->name);
+                        parse_error = 1; break;
                     }
                     int close = find_closing_brace(tokens, (int)i + 1);
-                    if (close < 0) { printf("Error: unclosed checker block\n"); break; }
+                    if (close < 0) {
+                        fprintf(stderr, "Error: unclosed check block in '%s'\n", ex->name);
+                        parse_error = 1; break;
+                    }
                     i++;
                     while ((int)i < close) {
                         if (ex->checker_len < MAX_CHECKER_TOKENS)
@@ -248,11 +269,15 @@ vector_token *extract_exceptions(vector_token *tokens) {
                 {
                     i++;
                     if (i >= tokens->size || strcmp(tokens->data[i].value, "{") != 0) {
-                        printf("Error: expected '{' after replace\n");
-                        break;
+                        fprintf(stderr, "Error: expected '{' after replace in '%s'\n",
+                                ex->name);
+                        parse_error = 1; break;
                     }
                     int close = find_closing_brace(tokens, (int)i + 1);
-                    if (close < 0) { printf("Error: unclosed replace block\n"); break; }
+                    if (close < 0) {
+                        fprintf(stderr, "Error: unclosed replace block in '%s'\n", ex->name);
+                        parse_error = 1; break;
+                    }
                     i++;
                     while ((int)i < close) {
                         if (ex->replace_len < MAX_CHECKER_TOKENS)
@@ -264,17 +289,21 @@ vector_token *extract_exceptions(vector_token *tokens) {
                 }
                 else { i++; }
             }
-            i++;
+            i++; /* пропускаем закрывающую '}' исключения */
 
-            if (ex->checker_len > 0 && ex->has_replace) {
-                printf("Error: exception '%s' cannot have both 'check' and 'replace'\n", ex->name);
-                exception_count--;
-            } else if (ex->checker_len == 0 && !ex->has_replace) {
-                printf("Warning: exception '%s' has neither 'check' nor 'replace'\n", ex->name);
+            if (parse_error) {
+                exception_count = saved_exception_count;
+                continue;
             }
 
-            printf("DEBUG extract: registered exception '%s', pattern_len=%d, checker_len=%d, has_replace=%d\n",
-                ex->name, ex->pattern_len, ex->checker_len, ex->has_replace);
+            if (ex->checker_len > 0 && ex->has_replace) {
+                fprintf(stderr, "Error: exception '%s' cannot have both 'check' and 'replace'\n",
+                        ex->name);
+                exception_count = saved_exception_count;
+            } else if (ex->checker_len == 0 && !ex->has_replace) {
+                fprintf(stderr, "Warning: exception '%s' has neither 'check' nor 'replace'\n",
+                        ex->name);
+            }
         }
         else {
             vt_push_back(result, tokens->data[i]);
@@ -389,13 +418,12 @@ static int g_match_counter = 0;
 static int capture_has_field(Exception *ex, const char *cap_name,
                               char *field_type_out)
 {
-    for (int fi = 0; fi < ex->field_count - 2; fi++) {
-        if (ex->fields[fi].type == TOK_KEYWORD &&
-            strcmp(ex->fields[fi].value, "var") == 0 &&
-            strcmp(ex->fields[fi + 2].value, cap_name) == 0)
-        {
+    /* Поля хранятся парами: [тип][имя][тип][имя]...
+     * Итерируем по парам — шаг 2. */
+    for (int fi = 0; fi + 1 < ex->field_count; fi += 2) {
+        if (strcmp(ex->fields[fi + 1].value, cap_name) == 0) {
             if (field_type_out)
-                strncpy(field_type_out, ex->fields[fi + 1].value, 63);
+                strncpy(field_type_out, ex->fields[fi].value, 63);
             return 1;
         }
     }
@@ -427,15 +455,12 @@ static void build_capture_inits(Exception *ex,
         cap_trunc[48] = '\0';
         snprintf(unique_names[pi], 64, "_ex_%s_%d", cap_trunc, g_match_counter);
 
-        printf("DEBUG capture: var %s %s = %s (tok_type=%d) -> %s\n",
-               field_type, cap_name, cap_val, cap_type, unique_names[pi]);
-
         Token t;
-        t.type = TOK_KEYWORD;   strncpy(t.value, "var",            63); vt_push_back(out, t);
-        t.type = TOK_TYPE;      strncpy(t.value, field_type,       63); vt_push_back(out, t);
-        t.type = TOK_IDENT;     strncpy(t.value, unique_names[pi], 63); vt_push_back(out, t);
+        t.line = 0; t.col = 0;
+        t.type = TOK_TYPE;      strncpy(t.value, field_type,       63); t.value[63] = '\0'; vt_push_back(out, t);
+        t.type = TOK_IDENT;     strncpy(t.value, unique_names[pi], 63); t.value[63] = '\0'; vt_push_back(out, t);
         t.type = TOK_OP;        strncpy(t.value, "=",              63); vt_push_back(out, t);
-        t.type = cap_type;      strncpy(t.value, cap_val,          63); vt_push_back(out, t);
+        t.type = cap_type;      strncpy(t.value, cap_val,          63); t.value[63] = '\0'; vt_push_back(out, t);
         t.type = TOK_SEMICOLON; strncpy(t.value, ";",              63); vt_push_back(out, t);
     }
 }
@@ -459,11 +484,11 @@ static void rename_captures_in_block(Token *toks, int len,
 
 vector_token *preparse(vector_token *tokens) {
     vector_token *result = malloc(sizeof(vector_token));
+    if (!result) {
+        fprintf(stderr, "Error: out of memory in preparse\n");
+        return NULL;
+    }
     vt_init(result, tokens->size * 2);
-
-    printf("DEBUG preparse: total tokens=%d, exceptions=%d\n", (int)tokens->size, exception_count);
-    for (unsigned di = 0; di < tokens->size && di < 30; di++)
-        printf("  [%d] type=%d value='%s'\n", di, tokens->data[di].type, tokens->data[di].value);
 
     unsigned i = 0;
     int stmt_start = 0;
@@ -484,10 +509,10 @@ vector_token *preparse(vector_token *tokens) {
 
             matched = 1;
             g_match_counter++;
-            printf("DEBUG preparse: matched exception '%s' at pos %d (match #%d)\n", ex->name, i, g_match_counter);
 
             if (ex->checker_len > 0 && ex->has_replace) {
-                printf("Error: exception '%s' has both check and replace, skipping\n", ex->name);
+                fprintf(stderr, "Error: exception '%s' has both check and replace, skipping\n",
+                        ex->name);
                 matched = 0;
                 continue;
             }
@@ -502,15 +527,18 @@ vector_token *preparse(vector_token *tokens) {
                 Token *suffix     = NULL;
                 if (suffix_len > 0) {
                     suffix = malloc(sizeof(Token) * suffix_len);
+                    if (!suffix) { fprintf(stderr, "Error: out of memory in preparse\n"); break; }
                     memcpy(suffix, &result->data[inject_pos], sizeof(Token) * suffix_len);
                     result->size = inject_pos;
                 }
 
                 int    source_len = suffix_len + match_len + 1;
-                Token *source     = malloc(sizeof(Token) * source_len);
+                Token *source     = malloc(sizeof(Token) * (source_len > 0 ? source_len : 1));
+                if (!source) { free(suffix); fprintf(stderr, "Error: out of memory in preparse\n"); break; }
                 int    si2        = 0;
                 for (int s2 = 0; s2 < suffix_len; s2++)
                     source[si2++] = suffix[s2];
+                /* suffix уже скопирован в source — теперь можно использовать оба независимо */
                 for (int m2 = 0; m2 < match_len; m2++)
                     source[si2++] = tokens->data[i + m2];
                 source[si2].type = TOK_SEMICOLON;
@@ -519,7 +547,12 @@ vector_token *preparse(vector_token *tokens) {
 
                 build_capture_inits(ex, captures, capture_types, result, unique_names);
 
-                Token *replace_copy = malloc(sizeof(Token) * ex->replace_len);
+                Token *replace_copy = malloc(sizeof(Token) * (ex->replace_len > 0 ? ex->replace_len : 1));
+                if (!replace_copy) {
+                    free(suffix); free(source);
+                    fprintf(stderr, "Error: out of memory in preparse\n");
+                    break;
+                }
                 memcpy(replace_copy, ex->replace, sizeof(Token) * ex->replace_len);
                 rename_captures_in_block(replace_copy, ex->replace_len, ex, unique_names);
 
@@ -601,19 +634,26 @@ vector_token *preparse(vector_token *tokens) {
                 Token *suffix     = NULL;
                 if (suffix_len > 0) {
                     suffix = malloc(sizeof(Token) * suffix_len);
+                    if (!suffix) { fprintf(stderr, "Error: out of memory in preparse\n"); break; }
                     memcpy(suffix, &result->data[inject_pos], sizeof(Token) * suffix_len);
                     result->size = inject_pos;
                 }
 
                 build_capture_inits(ex, captures, capture_types, result, unique_names);
 
-                Token *checker_copy = malloc(sizeof(Token) * ex->checker_len);
-                memcpy(checker_copy, ex->checker, sizeof(Token) * ex->checker_len);
-                rename_captures_in_block(checker_copy, ex->checker_len, ex, unique_names);
-
-                for (int ci = 0; ci < ex->checker_len; ci++)
-                    vt_push_back(result, checker_copy[ci]);
-                free(checker_copy);
+                if (ex->checker_len > 0) {
+                    Token *checker_copy = malloc(sizeof(Token) * ex->checker_len);
+                    if (!checker_copy) {
+                        free(suffix);
+                        fprintf(stderr, "Error: out of memory in preparse\n");
+                        break;
+                    }
+                    memcpy(checker_copy, ex->checker, sizeof(Token) * ex->checker_len);
+                    rename_captures_in_block(checker_copy, ex->checker_len, ex, unique_names);
+                    for (int ci = 0; ci < ex->checker_len; ci++)
+                        vt_push_back(result, checker_copy[ci]);
+                    free(checker_copy);
+                }
 
                 if (suffix_len > 0) {
                     for (int s2 = 0; s2 < suffix_len; s2++)

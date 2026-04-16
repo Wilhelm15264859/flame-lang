@@ -588,15 +588,6 @@ static int class_lookup(const char *name) {
     return 0;
 }
 
-static void err() {
-    long ret;
-    __asm__ __volatile__ (
-        "syscall"
-        : "=a"(ret)
-        : "a"(60), "D"(1)
-    );
-}
-
 static Node *make_node(NodeType type, const char *str) {
     Node *n = malloc(sizeof(Node));
     n->type = type;
@@ -640,6 +631,7 @@ Node parseMemberCompoundAssign(Token obj);
 Node *parse_body(void);
 Node parseEnum(void);
 Node parseVarDefConst(Token t);
+Node parseTypedef(void);
 
 static int is_func_type(const char *s) {
     return strncmp(s, "F<", 2) == 0;
@@ -667,6 +659,9 @@ Node parsing(void) {
         if (strcmp(current.value, "notdel") == 0) {
             Token type_tok = advance();
             return parseVarDef(type_tok, 0);
+        }
+        if (strcmp(current.value, "typedef") == 0) {
+            return parseTypedef();
         }
         if (strcmp(current.value, "const") == 0) {
             Token type_tok = advance();
@@ -748,7 +743,7 @@ type_decl:
             return parseAssign(current);
         else {
             printf("Error: unexpected identifier '%s'\n", current.value);
-            err();
+            exit(1);
         }
     }
 
@@ -762,7 +757,7 @@ type_decl:
     }
 
     printf("Error: unknown token '%s'\n", current.value);
-    err();
+    exit(1);
     Node error;
     error.type = NODE_ERROR;
     error.childs = NULL;
@@ -826,6 +821,49 @@ Node parseVarDefConst(Token t) {
     return parseVarDef(patched, 0);
 }
 
+Node parseTypedef(void) {
+    /* typedef <original_type> [*...] <alias_name> ; */
+    Node td;
+    td.childs = malloc(sizeof(vector_node));
+    vn_init(td.childs, 2);
+    td.str = NULL;
+
+    Token type_tok = advance();
+    if (type_tok.type != TOK_TYPE && type_tok.type != TOK_IDENT) {
+        printf("Error: expected type after 'typedef'\n");
+        exit(1);
+        td.type = NODE_ERROR;
+        return td;
+    }
+
+    char type_str[80];
+    strncpy(type_str, type_tok.value, 79);
+    type_str[79] = '\0';
+    collect_stars(type_str, 80);
+
+    Token alias_tok = advance();
+    if (alias_tok.type != TOK_IDENT) {
+        printf("Error: expected alias name in typedef\n");
+        exit(1);
+        td.type = NODE_ERROR;
+        return td;
+    }
+
+    /* Регистрируем как псевдоним типа, чтобы парсер его распознавал */
+    class_push(alias_tok.value);
+
+    Node *orig  = make_node(NODE_TYPE,  type_str);
+    Node *alias = make_node(NODE_IDENT, alias_tok.value);
+    vn_push_back(td.childs, *orig);  free(orig);
+    vn_push_back(td.childs, *alias); free(alias);
+
+    if (peek(0).type == TOK_SEMICOLON) advance();
+    else { printf("Error: semicolon expected after typedef\n"); exit(1); }
+
+    td.type = NODE_TYPEDEF;
+    return td;
+}
+
 Node parseEnum(void) {
     Node en;
     en.childs = malloc(sizeof(vector_node));
@@ -838,7 +876,7 @@ Node parseEnum(void) {
     Token brace = advance();
     if (strcmp(brace.value, "{") != 0) {
         printf("Error: expected '{' after enum name\n");
-        err();
+        exit(1);
         en.type = NODE_ERROR;
         return en;
     }
@@ -847,14 +885,14 @@ Node parseEnum(void) {
     while (strcmp(peek(0).value, "}") != 0) {
         if (peek(0).type == TOK_EOF) {
             printf("Error: unexpected EOF in enum body\n");
-            err();
+            exit(1);
             break;
         }
 
         Token name_tok = advance();
         if (name_tok.type != TOK_IDENT) {
             printf("Error: expected identifier in enum, got '%s'\n", name_tok.value);
-            err();
+            exit(1);
             en.type = NODE_ERROR;
             return en;
         }
@@ -866,7 +904,7 @@ Node parseEnum(void) {
             Token val_tok = advance();
             if (val_tok.type != TOK_INT) {
                 printf("Error: expected integer after '=' in enum\n");
-                err();
+                exit(1);
                 en.type = NODE_ERROR;
                 return en;
             }
@@ -919,7 +957,7 @@ Node parseExternCFuncDef(void) {
         free(type);
     } else {
         printf("Error: expected return type in extern \"C\" func\n");
-        err();
+        exit(1);
     }
 
     current = advance();
@@ -931,7 +969,7 @@ Node parseExternCFuncDef(void) {
         free(ident);
     } else {
         printf("Error: expected function name in extern \"C\" func\n");
-        err();
+        exit(1);
     }
 
     current = advance();
@@ -947,11 +985,11 @@ Node parseExternCFuncDef(void) {
         current = advance();
         if (strcmp(current.value, ")") != 0) {
             printf("Error: expected ')' in extern \"C\" func\n");
-            err();
+            exit(1);
         }
     } else {
         printf("Error: expected '(' in extern \"C\" func\n");
-        err();
+        exit(1);
     }
 
     current = advance();
@@ -966,7 +1004,7 @@ Node parseExternCFuncDef(void) {
         while (strcmp(peek(0).value, "}") != 0) {
             if (peek(0).type == TOK_EOF) {
                 printf("Error: unexpected EOF in extern \"C\" function body\n");
-                err();
+                exit(1);
                 break;
             }
             Node temp = parsing();
@@ -985,7 +1023,7 @@ Node parseExternCFuncDef(void) {
     }
 
     printf("Error: expected '{' or ';' in extern \"C\" func\n");
-    err();
+    exit(1);
     func.type = NODE_ERROR;
     return func;
 }
@@ -1000,7 +1038,7 @@ Node parseExternFuncDef(void) {
     char ret_type_str[80];
     if (t.type != TOK_TYPE && t.type != TOK_IDENT) {
         printf("Error: expected return type in extern func\n");
-        err();
+        exit(1);
         ext.type = NODE_ERROR;
         return ext;
     }
@@ -1013,7 +1051,7 @@ Node parseExternFuncDef(void) {
     t = advance();
     if (t.type != TOK_IDENT) {
         printf("Error: expected function name in extern func\n");
-        err();
+        exit(1);
         ext.type = NODE_ERROR;
         return ext;
     }
@@ -1024,7 +1062,7 @@ Node parseExternFuncDef(void) {
     t = advance();
     if (strcmp(t.value, "(") != 0) {
         printf("Error: expected '(' in extern func\n");
-        err();
+        exit(1);
         ext.type = NODE_ERROR;
         return ext;
     }
@@ -1041,13 +1079,13 @@ Node parseExternFuncDef(void) {
     t = advance();
     if (strcmp(t.value, ")") != 0) {
         printf("Error: expected ')' in extern func\n");
-        err();
+        exit(1);
     }
 
     if (peek(0).type == TOK_SEMICOLON) advance();
     else {
         printf("Error: semicolon expected");
-        err();
+        exit(1);
     }
 
     ext.type = NODE_EXTERN_FUNC_DEF;
@@ -1096,7 +1134,7 @@ Node parseDelete(void) {
     if (peek(0).type == TOK_SEMICOLON) advance();
     else {
         printf("Error: semicolon expected");
-        err();
+        exit(1);
     }
 
     del.type = NODE_DELETE;
@@ -1110,7 +1148,7 @@ Node *parse_body(void) {
         while (strcmp(peek(0).value, "}") != 0) {
             if (peek(0).type == TOK_EOF) {
                 printf("Error: unexpected EOF in body\n");
-                err();
+                exit(1);
                 break;
             }
             Node temp = parsing();
@@ -1121,7 +1159,7 @@ Node *parse_body(void) {
                 free(tc);
             } else {
                 printf("Error in body\n");
-                err();
+                exit(1);
             }
         }
         advance();
@@ -1182,7 +1220,7 @@ Node parseMemberCompoundAssign(Token obj) {
     if (peek(0).type == TOK_SEMICOLON) advance();
     else {
         printf("Error: semicolon expected");
-        err();
+        exit(1);
     }
     return assign;
 }
@@ -1233,7 +1271,7 @@ Node parseCompoundAssign(Token t, int f) {
     if (peek(0).type == TOK_SEMICOLON) advance();
     else if (f == 1) {
         printf("Error: semicolon expected");
-        err();
+        exit(1);
     }
 
     assign.type = NODE_ASSIGN;
@@ -1244,8 +1282,8 @@ Node parseAsm(Token arch_tok) {
     Node asmnode;
     memset(&asmnode, 0, sizeof(Node));
     asmnode.childs = malloc(sizeof(vector_node));
-    vn_init(asmnode.childs, 4);
-    asmnode.str = malloc(256);
+    vn_init(asmnode.childs, 8);
+    asmnode.str = malloc(2048);
     asmnode.str[0] = '\0';
 
     const char *asm_component = NULL;
@@ -1259,7 +1297,7 @@ Node parseAsm(Token arch_tok) {
     if (asm_component == NULL) {
         printf("Error [line %d, col %d]: unknown keyword or asm arch prefix '%s'\n",
                arch_tok.line, arch_tok.col, arch_tok.value);
-        err();
+        exit(1);
         asmnode.type = NODE_ERROR;
         return asmnode;
     }
@@ -1274,7 +1312,7 @@ Node parseAsm(Token arch_tok) {
                    arch_tok.line, arch_tok.col,
                    arch_tok.value, current_triple,
                    arch_tok.value);
-            err();
+            exit(1);
             asmnode.type = NODE_ERROR;
             return asmnode;
         }
@@ -1289,56 +1327,186 @@ Node parseAsm(Token arch_tok) {
     strcpy(arch_node.str, arch_tok.value);
     vn_push_back(asmnode.childs, arch_node);
 
-    char instr[256];
+    /* ── Собираем тело: одна инструкция или блок { ... } ── */
+    char instr[1024];
     instr[0] = '\0';
     int operand_count = 0;
+    int is_block = (peek(0).type == TOK_PAREN && strcmp(peek(0).value, "{") == 0);
 
-    Token mnemonic = advance();
-    if (mnemonic.type != TOK_IDENT) {
-        printf("Error [line %d, col %d]: expected instruction mnemonic after '%s'\n",
-               mnemonic.line, mnemonic.col, arch_tok.value);
-        err();
-        asmnode.type = NODE_ERROR;
-        return asmnode;
-    }
-    strncpy(instr, mnemonic.value, sizeof(instr) - 1);
+    if (is_block) {
+        advance(); /* { */
+        int first_instr = 1;
+        while (!(peek(0).type == TOK_PAREN && strcmp(peek(0).value, "}") == 0) &&
+               peek(0).type != TOK_EOF) {
+            /* Каждый оператор внутри блока разделён ';' */
+            if (!first_instr) strncat(instr, "\n", sizeof(instr) - strlen(instr) - 1);
+            first_instr = 0;
 
-    while (peek(0).type != TOK_SEMICOLON &&
-           peek(0).type != TOK_EOF &&
-           peek(0).type != TOK_ERROR &&
-           !(peek(0).type == TOK_OP && strcmp(peek(0).value, "==>") == 0)) {
-        Token op = advance();
-        size_t len = strlen(instr);
+            Token mnemonic = advance();
+            if (mnemonic.type == TOK_SEMICOLON) { first_instr = 1; continue; }
+            strncat(instr, mnemonic.value, sizeof(instr) - strlen(instr) - 1);
 
-        if (strcmp(op.value, ",") != 0 && len > 0)
-            strncat(instr, " ", sizeof(instr) - len - 1);
+            while (peek(0).type != TOK_SEMICOLON &&
+                   !(peek(0).type == TOK_PAREN && strcmp(peek(0).value, "}") == 0) &&
+                   peek(0).type != TOK_EOF &&
+                   !(peek(0).type == TOK_OP && strcmp(peek(0).value, "->") == 0)) {
+                Token op = advance();
+                size_t len = strlen(instr);
+                if (strcmp(op.value, ",") != 0 && len > 0)
+                    strncat(instr, " ", sizeof(instr) - len - 1);
+                if (strcmp(op.value, "$") == 0) {
+                    Token var_tok = advance();
+                    char placeholder[8];
+                    snprintf(placeholder, sizeof(placeholder), "$%d", operand_count);
+                    strncat(instr, placeholder, sizeof(instr) - strlen(instr) - 1);
+                    Node operand_node;
+                    memset(&operand_node, 0, sizeof(Node));
+                    operand_node.type   = NODE_VAR;
+                    operand_node.childs = malloc(sizeof(vector_node));
+                    vn_init(operand_node.childs, 1);
+                    operand_node.str = malloc(strlen(var_tok.value) + 1);
+                    strcpy(operand_node.str, var_tok.value);
+                    vn_push_back(asmnode.childs, operand_node);
+                    operand_count++;
+                } else {
+                    strncat(instr, op.value, sizeof(instr) - strlen(instr) - 1);
+                }
+            }
+            if (peek(0).type == TOK_SEMICOLON) advance();
+        }
+        if (peek(0).type == TOK_PAREN && strcmp(peek(0).value, "}") == 0)
+            advance(); /* } */
+    } else {
+        /* Одиночная инструкция */
+        Token mnemonic = advance();
+        if (mnemonic.type != TOK_IDENT) {
+            printf("Error [line %d, col %d]: expected instruction mnemonic after '%s'\n",
+                   mnemonic.line, mnemonic.col, arch_tok.value);
+            exit(1);
+            asmnode.type = NODE_ERROR;
+            return asmnode;
+        }
+        strncpy(instr, mnemonic.value, sizeof(instr) - 1);
 
-        if (strcmp(op.value, "$") == 0) {
-            Token var_tok = advance();
-            char placeholder[8];
-            snprintf(placeholder, sizeof(placeholder), "$%d", operand_count);
-            strncat(instr, placeholder, sizeof(instr) - strlen(instr) - 1);
-
-            Node operand_node;
-            memset(&operand_node, 0, sizeof(Node));
-            operand_node.type   = NODE_VAR;
-            operand_node.childs = malloc(sizeof(vector_node));
-            vn_init(operand_node.childs, 1);
-            operand_node.str = malloc(strlen(var_tok.value) + 1);
-            strcpy(operand_node.str, var_tok.value);
-            vn_push_back(asmnode.childs, operand_node);
-            operand_count++;
-        } else {
-            strncat(instr, op.value, sizeof(instr) - strlen(instr) - 1);
+        while (peek(0).type != TOK_SEMICOLON &&
+               peek(0).type != TOK_EOF &&
+               peek(0).type != TOK_ERROR &&
+               !(peek(0).type == TOK_OP && strcmp(peek(0).value, "==>") == 0) &&
+               !(peek(0).type == TOK_OP && strcmp(peek(0).value, "->") == 0)) {
+            Token op = advance();
+            size_t len = strlen(instr);
+            if (strcmp(op.value, ",") != 0 && len > 0)
+                strncat(instr, " ", sizeof(instr) - len - 1);
+            if (strcmp(op.value, "$") == 0) {
+                Token var_tok = advance();
+                char placeholder[8];
+                snprintf(placeholder, sizeof(placeholder), "$%d", operand_count);
+                strncat(instr, placeholder, sizeof(instr) - strlen(instr) - 1);
+                Node operand_node;
+                memset(&operand_node, 0, sizeof(Node));
+                operand_node.type   = NODE_VAR;
+                operand_node.childs = malloc(sizeof(vector_node));
+                vn_init(operand_node.childs, 1);
+                operand_node.str = malloc(strlen(var_tok.value) + 1);
+                strcpy(operand_node.str, var_tok.value);
+                vn_push_back(asmnode.childs, operand_node);
+                operand_count++;
+            } else {
+                strncat(instr, op.value, sizeof(instr) - strlen(instr) - 1);
+            }
         }
     }
 
+    /* Структура хранится в str узла как:
+     *   <instr>\x01<outputs_csv>\x01<clobbers_csv>\x01<inputs_csv>
+     * outputs_csv:  "rax:varName" 
+     * clobbers_csv: "rax,rdi,memory"
+     * inputs_csv:   "rax:varName,rdi:varName2"
+     */
+    char clobbers_str[256] = "";
+    char inputs_str[256]   = "";
+    char out_v[64] = "";
     char out_var[64] = "";
-    if (peek(0).type == TOK_OP && strcmp(peek(0).value, "==>") == 0) {
+    char out_reg[64] = "";
+
+    if (peek(0).type == TOK_OP && strcmp(peek(0).value, ">") == 0) {
         advance();
-        Token out_tok = advance();
-        strncpy(out_var, out_tok.value, 63);
+        if (peek(0).type == TOK_IDENT) {
+            strncpy(out_reg, advance().value, 63);
+
+            if (strcmp(peek(0).value, "(") == 0) {
+                advance();
+                
+                if (peek(0).type == TOK_IDENT) {
+                    strncpy(out_v, advance().value, 63);
+                }
+                else {
+                    printf("Error: variable's name expected");
+                    exit(1);
+                }
+
+                if (strcmp(peek(0).value, ")") != 0) {
+                    printf("Error: ')' expected in %i", peek(0).line);
+                    exit(1);
+                }
+
+                advance();
+            }
+            else {
+                printf("Error: '(' expected in %i", peek(0).line);
+                exit(1);
+            }
+
+            strncat(out_var, out_reg, sizeof(out_var) - strlen(out_var) - 1);
+            strncat(out_var, ":",     sizeof(out_var) - strlen(out_var) - 1);
+            strncat(out_var, out_v,   sizeof(out_var) - strlen(out_var) - 1);
+        }
+        else {
+            printf("Error: register's name expected");
+            exit(1);
+        }
     }
+
+    if (peek(0).type == TOK_OP && strcmp(peek(0).value, ":") == 0) {
+        advance(); /* -> */
+        /* Читаем регистры-клоберы до ':' или ';' */
+        while (peek(0).type != TOK_SEMICOLON &&
+               peek(0).type != TOK_EOF &&
+               !(peek(0).type == TOK_OP && strcmp(peek(0).value, ":") == 0)) {
+            Token reg_tok = advance();
+            if (clobbers_str[0]) strncat(clobbers_str, ",", sizeof(clobbers_str) - strlen(clobbers_str) - 1);
+            strncat(clobbers_str, reg_tok.value, sizeof(clobbers_str) - strlen(clobbers_str) - 1);
+        }
+        /* Читаем inputs: : reg(varName) reg2(varName2) */
+        if (peek(0).type == TOK_OP && strcmp(peek(0).value, ":") == 0) {
+            advance(); /* : */
+            while (peek(0).type != TOK_SEMICOLON && peek(0).type != TOK_EOF) {
+                /* reg(varName) */
+                Token reg_tok = advance(); /* регистр */
+                if (peek(0).type != TOK_PAREN || strcmp(peek(0).value, "(") != 0) {
+                    printf("Error: expected '(varName)' after register in asm inputs\n");
+                    exit(1);
+                }
+                advance(); /* ( */
+                Token var_tok = advance(); /* имя переменной */
+                if (peek(0).type == TOK_PAREN && strcmp(peek(0).value, ")") == 0) advance();
+                if (inputs_str[0]) strncat(inputs_str, ",", sizeof(inputs_str) - strlen(inputs_str) - 1);
+                strncat(inputs_str, reg_tok.value,  sizeof(inputs_str) - strlen(inputs_str) - 1);
+                strncat(inputs_str, ":",             sizeof(inputs_str) - strlen(inputs_str) - 1);
+                strncat(inputs_str, var_tok.value,   sizeof(inputs_str) - strlen(inputs_str) - 1);
+            }
+        }
+    }
+
+    /* Кодируем всё в asmnode.str через разделители \x01 */
+    /* Формат: instr \x01 out_var \x01 clobbers \x01 inputs */
+    {
+        snprintf(asmnode.str, 2047, "%s\x01%s\x01%s\x01%s",
+                 instr, out_var, clobbers_str, inputs_str);
+        asmnode.str[2047] = '\0';
+    }
+
+    /* Узел вывода (for backward compat в codegen_asm) */
     Node out_node;
     out_node.type   = NODE_IDENT;
     out_node.childs = malloc(sizeof(vector_node));
@@ -1348,13 +1516,11 @@ Node parseAsm(Token arch_tok) {
 
     if (peek(0).type == TOK_SEMICOLON)
         advance();
-    else {
-        printf("Error: semicolon expected");
-        err();
+    else if (!is_block) {
+        printf("Error: semicolon expected after asm\n");
+        exit(1);
     }
 
-    strncpy(asmnode.str, instr, 255);
-    asmnode.str[255] = '\0';
     asmnode.type = NODE_ASM;
     return asmnode;
 }
@@ -1368,7 +1534,7 @@ Node parsePtrAssign(void) {
     Token t = advance();
     if (t.type != TOK_IDENT) {
         printf("Error: expected identifier after '*'\n");
-        err();
+        exit(1);
         assign.type = NODE_ERROR;
         return assign;
     }
@@ -1381,7 +1547,7 @@ Node parsePtrAssign(void) {
         advance();
     else {
         printf("Error: expected '=' after '*%s'\n", t.value);
-        err();
+        exit(1);
     }
 
     Node *expr = parseExpr();
@@ -1393,7 +1559,7 @@ Node parsePtrAssign(void) {
     if (peek(0).type == TOK_SEMICOLON) advance();
     else {
         printf("Error: semicolon expected");
-        err();
+        exit(1);
     }
 
     assign.type = NODE_PTR_ASSIGN;
@@ -1465,7 +1631,7 @@ Node parseAssign(Token t) {
             advance();
         else {
             printf("Error: expected ']'\n");
-            err();
+            exit(1);
         }
         
         assign.type = NODE_INDEX_ASSIGN;
@@ -1480,7 +1646,7 @@ Node parseAssign(Token t) {
             Token field = peek(0);
             if (field.type != TOK_IDENT) {
                 printf("Error: expected field name\n");
-                err();
+                exit(1);
                 break;
             }
             advance();
@@ -1499,7 +1665,7 @@ Node parseAssign(Token t) {
             Node *idx = parseExpr();
             if (strcmp(peek(0).value, "]") == 0)
                 advance();
-            else { printf("Error: expected ']'\n"); err(); }
+            else { printf("Error: expected ']'\n"); exit(1); }
 
             /* chain continues: [idx].field or [idx]->field */
             if (peek(0).type == TOK_OP &&
@@ -1520,7 +1686,7 @@ Node parseAssign(Token t) {
                     Token field2 = peek(0);
                     if (field2.type != TOK_IDENT) {
                         printf("Error: expected field name\n");
-                        err(); break;
+                        exit(1); break;
                     }
                     advance();
                     Node *member2 = make_node(
@@ -1535,7 +1701,7 @@ Node parseAssign(Token t) {
                     advance();
                     Node *idx2 = parseExpr();
                     if (strcmp(peek(0).value, "]") == 0) advance();
-                    else { printf("Error: expected ']'\n"); err(); }
+                    else { printf("Error: expected ']'\n"); exit(1); }
                     vn_push_back(assign.childs, *var); free(var);
                     if (idx2) { vn_push_back(assign.childs, *idx2); free(idx2); }
                     assign.type = NODE_MEMBER_INDEX_ASSIGN;
@@ -1620,13 +1786,13 @@ Node parseAssign(Token t) {
     }
     else {
         printf("Error: expected '='\n");
-        err();
+        exit(1);
     }
 
     if (peek(0).type == TOK_SEMICOLON) advance();
     else {
         printf("Error: semicolon expected");
-        err();
+        exit(1);
     }
 
     return assign;
@@ -1653,7 +1819,7 @@ Node parseReturn(void) {
             advance();
         else {
             printf("Error: expected ';' after return value\n");
-            err();
+            exit(1);
         }
     }
 
@@ -1689,7 +1855,7 @@ static Node parseFuncCallInner(Token t, int is_stmt) {
             advance();
         else {
             printf("Error: expected ')' in function call\n");
-            err();
+            exit(1);
         }
     }
     vn_push_back(call.childs, *args);
@@ -1713,7 +1879,7 @@ static Node parseFuncCallInner(Token t, int is_stmt) {
         if (peek(0).type == TOK_SEMICOLON) advance();
         else {
             printf("Error: semicolon expected");
-            err();
+            exit(1);
         }
     }
 
@@ -1738,11 +1904,11 @@ Node parseIf(void) {
         current = advance();
         if (strcmp(current.value, ")") != 0) {
             printf("Error: expected ')' after if condition\n");
-            err();
+            exit(1);
         }
     } else {
         printf("Error: expected '(' after if\n");
-        err();
+        exit(1);
     }
 
     Node *body = parse_body();
@@ -1784,11 +1950,11 @@ Node parseWhile(void) {
         current = advance();
         if (strcmp(current.value, ")") != 0) {
             printf("Error: expected ')' after while condition\n");
-            err();
+            exit(1);
         }
     } else {
         printf("Error: expected '(' after while\n");
-        err();
+        exit(1);
     }
 
     Node *body = parse_body();
@@ -1807,14 +1973,14 @@ Node parseDoWhile(void) {
     Token t = advance();
     if (strcmp(t.value, "while") != 0) {
         printf("Error: expected 'while' after 'do'\n");
-        err();
+        exit(1);
         dowhile.type = NODE_ERROR;
         return dowhile;
     }
     t = advance();
     if (strcmp(t.value, "(") != 0) {
         printf("Error: expected '(' after 'while'\n");
-        err();
+        exit(1);
         dowhile.type = NODE_ERROR;
         return dowhile;
     }
@@ -1822,7 +1988,7 @@ Node parseDoWhile(void) {
     Node *cond = parseExpr();
     if (!cond) {
         printf("Error: expected condition in do while\n");
-        err();
+        exit(1);
         dowhile.type = NODE_ERROR;
         return dowhile;
     }
@@ -1832,7 +1998,7 @@ Node parseDoWhile(void) {
     t = advance();
     if (strcmp(t.value, ")") != 0) {
         printf("Error: expected ')' after do while condition\n");
-        err();
+        exit(1);
     }
 
     Node *body = parse_body();
@@ -1841,7 +2007,7 @@ Node parseDoWhile(void) {
     if (peek(0).type == TOK_SEMICOLON) advance();
     else {
         printf("Error: semicolon expected");
-        err();
+        exit(1);
     }
 
     dowhile.type = NODE_DO_WHILE;
@@ -1857,7 +2023,7 @@ Node parseFor(void) {
     Token t = advance();
     if (strcmp(t.value, "(") != 0) {
         printf("Error: expected '(' after 'for'\n");
-        err();
+        exit(1);
         fornode.type = NODE_ERROR;
         return fornode;
     }
@@ -1910,12 +2076,12 @@ Node parseFor(void) {
                 step = parseAssign(step_tok);
             else {
                 printf("Error: expected step expression in for\n");
-                err();
+                exit(1);
                 step.type = NODE_ERROR; step.childs = NULL; step.str = NULL;
             }
         } else {
             printf("Error: expected identifier in for step\n");
-            err();
+            exit(1);
             step.type = NODE_ERROR; step.childs = NULL; step.str = NULL;
         }
         if (step.type == NODE_ERROR) { fornode.type = NODE_ERROR; return fornode; }
@@ -1925,7 +2091,7 @@ Node parseFor(void) {
     t = advance();
     if (strcmp(t.value, ")") != 0) {
         printf("Error: expected ')' after for header\n");
-        err();
+        exit(1);
     }
 
     Node *body = parse_body();
@@ -1951,7 +2117,7 @@ static Node parseFuncDefInner(Token t, int do_mangle) {
         free(type);
     } else {
         printf("Error: unknown function return type\n");
-        err();
+        exit(1);
     }
 
     current = advance();
@@ -1961,7 +2127,7 @@ static Node parseFuncDefInner(Token t, int do_mangle) {
         free(ident);
     } else {
         printf("Error: expected function name\n");
-        err();
+        exit(1);
     }
 
     current = advance();
@@ -1977,11 +2143,11 @@ static Node parseFuncDefInner(Token t, int do_mangle) {
         current = advance();
         if (strcmp(current.value, ")") != 0) {
             printf("Error: expected ')' after params\n");
-            err();
+            exit(1);
         }
     } else {
         printf("Error: expected '(' in function def\n");
-        err();
+        exit(1);
     }
 
     if (do_mangle) {
@@ -2032,7 +2198,7 @@ static Node parseFuncDefInner(Token t, int do_mangle) {
         while (strcmp(peek(0).value, "}") != 0) {
             if (peek(0).type == TOK_EOF) {
                 printf("Error: unexpected EOF in function body\n");
-                err();
+                exit(1);
                 break;
             }
             Node temp = parsing();
@@ -2043,7 +2209,7 @@ static Node parseFuncDefInner(Token t, int do_mangle) {
                 free(temp_copy);
             } else {
                 printf("Error in function scope\n");
-                err();
+                exit(1);
             }
         }
         advance();
@@ -2051,7 +2217,7 @@ static Node parseFuncDefInner(Token t, int do_mangle) {
         free(scope);
     } else {
         printf("Error: expected '{' in function def\n");
-        err();
+        exit(1);
     }
 
     func.type = NODE_FUNC_DEF;
@@ -2128,7 +2294,7 @@ Node parseVarDef(Token t, int m) {
         Token name_tok = advance();
         if (name_tok.type != TOK_IDENT) {
             printf("Error: expected variable name after F<> type\n");
-            err();
+            exit(1);
             var.type = NODE_ERROR;
             return var;
         }
@@ -2149,12 +2315,12 @@ Node parseVarDef(Token t, int m) {
             Node *size_expr = parseExpr();
             if (!size_expr) {
                 printf("Error: expected array size\n");
-                err();
+                exit(1);
             }
             vn_push_back(var.childs, *size_expr);
             free(size_expr);
             if (strcmp(peek(0).value, "]") == 0) advance();
-            else { printf("Error: expected ']'\n"); err(); }
+            else { printf("Error: expected ']'\n"); exit(1); }
             Node *undef = make_node(NODE_UNDEF, "");
             vn_push_back(var.childs, *undef);
             free(undef);
@@ -2203,7 +2369,7 @@ Node parseVarDef(Token t, int m) {
         strncpy(base_type, current.value, 63);
     } else {
         printf("Error: unknown variable type '%s'\n", current.value);
-        err();
+        exit(1);
     }
 
     current = advance();
@@ -2217,7 +2383,7 @@ Node parseVarDef(Token t, int m) {
         free(ident);
     } else {
         printf("Error: expected identifier, got '%s'\n", current.value);
-        err();
+        exit(1);
     }
 
     var_type_push(var_name, base_type);
@@ -2227,7 +2393,7 @@ Node parseVarDef(Token t, int m) {
         Node *size_expr = parseExpr();
         if (!size_expr) {
             printf("Error: expected array size expression\n");
-            err();
+            exit(1);
         }
         vn_push_back(var.childs, *size_expr);
         free(size_expr);
@@ -2235,7 +2401,7 @@ Node parseVarDef(Token t, int m) {
             advance();
         else {
             printf("Error: expected ']'\n");
-            err();
+            exit(1);
         }
         Node *undef = make_node(NODE_UNDEF, "");
         vn_push_back(var.childs, *undef);
@@ -2304,7 +2470,7 @@ Node parseStruct(void) {
     Token name = advance();
     if (name.type != TOK_IDENT) {
         printf("Error: expected struct name\n");
-        err();
+        exit(1);
         str.type = NODE_ERROR;
         return str;
     }
@@ -2317,7 +2483,7 @@ Node parseStruct(void) {
     Token brace = advance();
     if (strcmp(brace.value, "{") != 0) {
         printf("Error: expected '{' after struct name\n");
-        err();
+        exit(1);
         str.type = NODE_ERROR;
         return str;
     }
@@ -2325,14 +2491,14 @@ Node parseStruct(void) {
     while (strcmp(peek(0).value, "}") != 0) {
         if (peek(0).type == TOK_EOF) {
             printf("Error: unexpected EOF in struct body\n");
-            err();
+            exit(1);
             break;
         }
 
         if (peek(0).type != TOK_TYPE &&
             !(peek(0).type == TOK_IDENT && class_lookup(peek(0).value))) {
             printf("Error: expected type in struct body\n");
-            err();
+            exit(1);
             str.type = NODE_ERROR;
             return str;
         }
@@ -2341,7 +2507,7 @@ Node parseStruct(void) {
         Node field = parseVarDef(field_type, 0);
         if (field.type == NODE_ERROR) {
             printf("Error in struct field\n");
-            err();
+            exit(1);
             str.type = NODE_ERROR;
             return str;
         }
@@ -2349,6 +2515,7 @@ Node parseStruct(void) {
     }
 
     advance();
+    if (peek(0).type == TOK_SEMICOLON) advance();
 
     str.type = NODE_STRUCT_DEF;
     return str;
@@ -2383,7 +2550,7 @@ Node parseClass(void) {
     Token name = advance();
     if (name.type != TOK_IDENT) {
         printf("Error: expected class name\n");
-        err();
+        exit(1);
         cls.type = NODE_ERROR;
         return cls;
     }
@@ -2398,7 +2565,7 @@ Node parseClass(void) {
         Token parent = advance();
         if (parent.type != TOK_IDENT) {
             printf("Error: expected parent class name\n");
-            err();
+            exit(1);
             cls.type = NODE_ERROR;
             return cls;
         }
@@ -2420,7 +2587,7 @@ Node parseClass(void) {
     }
     if (strcmp(brace.value, "{") != 0) {
         printf("Error: expected '{' after class name\n");
-        err();
+        exit(1);
         cls.type = NODE_ERROR;
         return cls;
     }
@@ -2434,7 +2601,7 @@ Node parseClass(void) {
     while (strcmp(peek(0).value, "}") != 0) {
         if (peek(0).type == TOK_EOF) {
             printf("Error: unexpected EOF in class body\n");
-            err();
+            exit(1);
             break;
         }
 
@@ -2458,7 +2625,7 @@ Node parseClass(void) {
                 Node method = parseFuncDefInner(type_tok, 0);
                 if (method.type == NODE_ERROR) {
                     printf("Error in class method\n");
-                    err();
+                    exit(1);
                     cls.type = NODE_ERROR;
                     return cls;
                 }
@@ -2549,7 +2716,7 @@ Node parseClass(void) {
                 Node field = parseVarDef(type_tok, 1);
                 if (field.type == NODE_ERROR) {
                     printf("Error in class field\n");
-                    err();
+                    exit(1);
                     cls.type = NODE_ERROR;
                     return cls;
                 }
@@ -2621,7 +2788,7 @@ Node parseClass(void) {
             Token tok = advance();
             if (strcmp(tok.value, "(") != 0) {
                 printf("Error: expected '(' after 'new'\n");
-                err();
+                exit(1);
                 cls.type = NODE_ERROR;
                 return cls;
             }
@@ -2633,7 +2800,7 @@ Node parseClass(void) {
             tok = advance();
             if (strcmp(tok.value, ")") != 0) {
                 printf("Error: expected ')' after constructor params\n");
-                err();
+                exit(1);
             }
 
             vn_push_back(method.childs, *params_node);
@@ -2714,7 +2881,7 @@ Node parseClass(void) {
             Token tok = advance();
             if (strcmp(tok.value, "(") != 0) {
                 printf("Error: expected '(' after 'delete'\n");
-                err();
+                exit(1);
                 cls.type = NODE_ERROR;
                 return cls;
             }
@@ -2726,7 +2893,7 @@ Node parseClass(void) {
             tok = advance();
             if (strcmp(tok.value, ")") != 0) {
                 printf("Error: expected ')' after destructor params\n");
-                err();
+                exit(1);
             }
 
             vn_push_back(method.childs, *params_node);
@@ -2779,7 +2946,7 @@ Node parseClass(void) {
         else {
             printf("Error: expected type, 'new', 'delete', or 'static' in class body, got '%s'\n",
                    peek(0).value);
-            err();
+            exit(1);
             cls.type = NODE_ERROR;
             return cls;
         }
@@ -2863,6 +3030,8 @@ Node parseClass(void) {
         vn_push_back(cls.childs, method);
     }
 
+    if (peek(0).type == TOK_SEMICOLON) advance();
+
     cls.type = NODE_STRUCT_DEF;
     return cls;
 }
@@ -2876,7 +3045,7 @@ static Node *expr_primary(void) {
         Token paren = advance();
         if (strcmp(paren.value, "(") != 0) {
             printf("Error: expected '(' after 'new'\n");
-            err();
+            exit(1);
             return NULL;
         }
 
@@ -2891,14 +3060,14 @@ static Node *expr_primary(void) {
         Token close = advance();
         if (strcmp(close.value, ")") != 0) {
             printf("Error: expected ')' in new expression\n");
-            err();
+            exit(1);
             return NULL;
         }
 
         Token cls_tok = advance();
         if (cls_tok.type != TOK_IDENT && cls_tok.type != TOK_TYPE) {
             printf("Error: expected class name after 'new(...)'\n");
-            err();
+            exit(1);
             return NULL;
         }
 
@@ -2915,7 +3084,7 @@ static Node *expr_primary(void) {
         Token type_tok = advance();
         if (type_tok.type != TOK_TYPE && type_tok.type != TOK_IDENT) {
             printf("Error: expected type after 'sizeof'\n");
-            err();
+            exit(1);
             return NULL;
         }
         return make_node(NODE_SIZEOF, type_tok.value);
@@ -2931,7 +3100,7 @@ static Node *expr_primary(void) {
         Token var_tok = advance();
         if (var_tok.type != TOK_IDENT) {
             printf("Error: expected identifier after '&'\n");
-            err();
+            exit(1);
             return NULL;
         }
 
@@ -2942,7 +3111,7 @@ static Node *expr_primary(void) {
                 advance();
             else {
                 printf("Error: expected ']'\n");
-                err();
+                exit(1);
             }
             Node *node = make_node(NODE_ADDR_INDEX, var_tok.value);
             vn_push_back(node->childs, *idx);
@@ -3015,7 +3184,7 @@ static Node *expr_primary(void) {
                     cls = t.value;
                 } else {
                     printf("Error: unknown type for variable '%s'\n", t.value);
-                    err();
+                    exit(1);
                     return NULL;
                 }
             }
@@ -3115,12 +3284,21 @@ static Node *expr_primary(void) {
                 advance();
             else {
                 printf("Error: expected ']'\n");
-                err();
+                exit(1);
             }
             return node;
         }
         
         return make_node(NODE_VAR, t.value);
+    }
+
+    if (t.type == TOK_TYPE &&
+        strcmp(t.value, "T")    != 0 &&
+        strcmp(t.value, "F")    != 0 &&
+        strcmp(t.value, "void") != 0)
+    {
+        advance();
+        return make_node(NODE_TYPE_LITERAL, t.value);
     }
 
     if (strcmp(t.value, "(") == 0) {
@@ -3130,13 +3308,13 @@ static Node *expr_primary(void) {
             advance();
         else {
             printf("Error: expected ')'\n");
-            err();
+            exit(1);
         }
         return inner;
     }
 
     printf("Error: unexpected token in expression, got '%s'\n", t.value);
-    err();
+    exit(1);
     return NULL;
 }
 
@@ -3189,7 +3367,7 @@ static Node *expr_postfix(void) {
                 advance();
             else {
                 printf("Error: expected ']'\n");
-                err();
+                exit(1);
             }
             Node *node = make_node(NODE_INDEX, "[]");
             vn_push_back(node->childs, *left);
