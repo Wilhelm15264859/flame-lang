@@ -7,14 +7,21 @@
 /* ═══════════════════════════════════════════════════════════════════
  * Константы
  * ═══════════════════════════════════════════════════════════════════ */
-#define MAX_AUTODEL        64
+#define MAX_AUTODEL         64
 #define MAX_OWNERSHIP_FUNCS 64
-#define MAX_VADDR_VARS     128
-#define MAX_VADDR_NAMES    32
-#define MAX_FIELD_ALIASES  32
-#define MAX_INDEX_ALIASES  32
-#define MAX_VADDR_POOL     512
-#define MAX_GLOBAL_SLOTS   256
+#define MAX_VADDR_VARS      64 //
+#define MAX_VADDR_NAMES     64 //
+#define MAX_FIELD_ALIASES   46
+#define MAX_INDEX_ALIASES   64
+#define MAX_VADDR_POOL      64 //
+#define MAX_GLOBAL_SLOTS    64
+#define MAX_FUNC_PARAMS     32
+#define MAX_FUNC_INDEX      64 //
+#define MAX_PARAM_ALIASES   16
+#define MAX_PARAM_FIELDS    16
+
+static size_t max_auotdel = MAX_AUTODEL;
+static size_t max_ownership_funcs = MAX_OWNERSHIP_FUNCS;
 
 /* ═══════════════════════════════════════════════════════════════════
  * Счётчик глобальных индексных переменных (_idx_N)
@@ -25,8 +32,8 @@ static int g_idx_counter = 0;
  * Глобальные счётчики
  * ═══════════════════════════════════════════════════════════════════ */
 static int  autodel_counter     = 0;
-static int  ownership_func_count = 0;
-static char ownership_funcs[MAX_OWNERSHIP_FUNCS][64];
+static size_t  ownership_func_count = 0;
+static char (*ownership_funcs)[64];
 
 /* ═══════════════════════════════════════════════════════════════════
  * Пул виртуальных адресов
@@ -55,8 +62,6 @@ static void vaddr_push_free(int addr) {
 /* ═══════════════════════════════════════════════════════════════════
  * Индекс функций — таблица всех известных функций и их параметров
  * ═══════════════════════════════════════════════════════════════════ */
-#define MAX_FUNC_PARAMS  32
-#define MAX_FUNC_INDEX   128
 
 /* Запись об одном параметре функции: имя + является ли указателем */
 typedef struct {
@@ -85,7 +90,10 @@ static FuncRecord *func_index_get_or_add(const char *name) {
     for (int i = 0; i < g_func_index_count; i++)
         if (strcmp(g_func_index[i].name, name) == 0)
             return &g_func_index[i];
-    if (g_func_index_count >= MAX_FUNC_INDEX) return NULL;
+    if (g_func_index_count >= MAX_FUNC_INDEX) {
+        fprintf(stderr, "Error: buffer overflow -> out of memory");
+        exit(1);
+    };
     FuncRecord *r = &g_func_index[g_func_index_count];
     strncpy(r->name, name, 63); r->name[63] = '\0';
     r->index       = g_func_index_count;
@@ -126,9 +134,6 @@ static void func_index_register_params(FuncRecord *r, Node *params_node) {
  * ═══════════════════════════════════════════════════════════════════ */
 
 /* Эффект, который функция производит над одним параметром-указателем */
-#define MAX_PARAM_ALIASES  16
-#define MAX_PARAM_FIELDS   16
-
 typedef struct {
     char alias[64];      /* имя нового алиаса внутри тела функции */
 } ParamAliasEffect;
@@ -378,24 +383,44 @@ static void pregen_inline_new(vector_node *nodes, int start, int end) {
  * Ownership-функции
  * ═══════════════════════════════════════════════════════════════════ */
 static void ownership_func_push(const char *name) {
-    for (int i = 0; i < ownership_func_count; i++)
+    for (size_t i = 0; i < ownership_func_count; i++)
         if (strcmp(ownership_funcs[i], name) == 0) return;
-    if (ownership_func_count >= MAX_OWNERSHIP_FUNCS) return;
+    if (ownership_func_count >= max_ownership_funcs) {
+        max_ownership_funcs *= 2;
+        char (*re_ownership_funcs)[64] = realloc(ownership_funcs, max_ownership_funcs * 64);
+        if (!re_ownership_funcs) {
+            fprintf(stderr, "Error: buffer overflow -> out of memory");
+            exit(1);
+        }
+        ownership_funcs = re_ownership_funcs;
+    }
     strncpy(ownership_funcs[ownership_func_count++], name, 63);
 }
 
 static int ownership_func_lookup(const char *name) {
-    for (int i = 0; i < ownership_func_count; i++)
+    for (size_t i = 0; i < ownership_func_count; i++)
         if (strcmp(ownership_funcs[i], name) == 0) return 1;
     return 0;
 }
 
-static void collect_autodel_names_in_scope(vector_node *nodes, char out[MAX_AUTODEL][64], int *count) {
+typedef char (*char_arr_ptr_8)[64];
+static char_arr_ptr_8 collect_autodel_names_in_scope(vector_node *nodes, char (*out)[64], size_t *count) {
     for (unsigned long long j = 0; j < nodes->size; j++) {
         Node *n = &nodes->data[j];
         if (n->type == NODE_VAR_DEF && n->childs->size >= 2) {
             const char *ts = n->childs->data[0].str;
-            if (strncmp(ts, "autodel:", 8) == 0 && *count < MAX_AUTODEL)
+
+            if (*count >= max_auotdel) {
+                max_auotdel *= 2;
+                char (*re_out)[64] = realloc(out, max_auotdel * 64);
+                if (!re_out) {
+                    fprintf(stderr, "Error: buffer overflow -> out of memory");
+                    exit(1);
+                }
+                out = re_out;
+            }
+
+            if (strncmp(ts, "autodel:", 8) == 0)
                 strncpy(out[(*count)++], n->childs->data[1].str, 63);
         }
         if (n->type == NODE_SCOPE && n->childs)
@@ -407,9 +432,11 @@ static void collect_autodel_names_in_scope(vector_node *nodes, char out[MAX_AUTO
                     collect_autodel_names_in_scope(child->childs, out, count);
             }
     }
+
+    return out;
 }
 
-static void collect_returns_in_scope(vector_node *nodes, char autodel_names[MAX_AUTODEL][64], int autodel_count, const char *fname) {
+static void collect_returns_in_scope(vector_node *nodes, char (*autodel_names)[64], int autodel_count, const char *fname) {
     for (unsigned long long j = 0; j < nodes->size; j++) {
         Node *n = &nodes->data[j];
         if (n->type == NODE_RETURN && n->childs->size > 0) {
@@ -437,9 +464,9 @@ static void collect_ownership_func(Node *func_node) {
     const char *fname = func_node->childs->data[1].str;
     Node *scope = &func_node->childs->data[3];
     if (scope->type != NODE_SCOPE) return;
-    char autodel_names[MAX_AUTODEL][64];
-    int  autodel_count = 0;
-    collect_autodel_names_in_scope(scope->childs, autodel_names, &autodel_count);
+    char (*autodel_names)[64] = malloc(max_auotdel * 64);
+    size_t  autodel_count = 0;
+    autodel_names = collect_autodel_names_in_scope(scope->childs, autodel_names, &autodel_count);
     if (autodel_count == 0) return;
     collect_returns_in_scope(scope->childs, autodel_names, autodel_count, fname);
 }
@@ -563,6 +590,10 @@ static void slot_add_name(VAddrSlot *s, const char *name) {
         if (strcmp(s->names[k], name) == 0) return;
     if (s->name_count < MAX_VADDR_NAMES)
         strncpy(s->names[s->name_count++], name, 63);
+    else {
+        fprintf(stderr, "Error: buffer overflow -> out of memory");
+        exit(1);
+    }
 }
 
 static void slot_remove_name(VAddrSlot *s, const char *name) {
@@ -805,6 +836,10 @@ static void split_lifetime_recursive(vector_node *vec, int start, int end, VAddr
                             strncpy(ns->base_type, old_slot->base_type, 63);
                             slot_add_name(ns, dest);
                         }
+                        else {
+                            fprintf(stderr, "Error: buffer overflow -> out of memory");
+                            exit(1);
+                        }
                     }
                 }
             }
@@ -931,7 +966,11 @@ static void bs_set(uint64_t *w, int bit) {
     w[bit >> 6] |= (uint64_t)1 << (bit & 63);
 }
 static int bs_test(const uint64_t *w, int bit) {
-    if (bit < 0 || bit >= MAX_VADDR_VARS) return 0;
+    if (bit < 0) return 0;
+    if (bit >= MAX_VADDR_VARS) {
+        fprintf(stderr, "Error: buffer overflow -> out of memory");
+        exit(1);
+    }
     return (w[bit >> 6] >> (bit & 63)) & 1;
 }
 static int bs_or_changed(uint64_t *dst, const uint64_t *src) {
@@ -1304,7 +1343,10 @@ static void pregen_scope(vector_node *nodes, int start, int end,
         if (n->type != NODE_VAR_DEF || n->childs->size < 2) continue;
         const char *type_str = n->childs->data[0].str;
         if (strncmp(type_str, "autodel:", 8) != 0) continue;
-        if (slot_count >= MAX_VADDR_VARS) break;
+        if (slot_count >= MAX_VADDR_VARS) {
+            fprintf(stderr, "Error: buffer overflow -> out of memory");
+            exit(1);
+        };
 
         VAddrSlot *s   = &slots[slot_count++];
         s->vaddr       = vaddr_pop();
@@ -1709,6 +1751,7 @@ static void emit_idx_global_defs(vector_node *nodes) {
 void pregen(vector_node *nodes) {
     autodel_counter      = 0;
     ownership_func_count = 0;
+    ownership_funcs = malloc(max_ownership_funcs * 64);
     vaddr_pool_init();
     gaa_reset();
     func_index_reset();
@@ -1729,7 +1772,7 @@ void pregen(vector_node *nodes) {
 
     pregen_inline_new(nodes, 0, (int)nodes->size);
 
-    int prev = -1;
+    size_t prev = -1;
     while (prev != ownership_func_count) {
         prev = ownership_func_count;
         collect_ownership(nodes, 0, (int)nodes->size);

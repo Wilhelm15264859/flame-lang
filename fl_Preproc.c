@@ -10,26 +10,29 @@
   #include <stdlib.h>
 #endif
 
-#define MAX_DEFINES  256
-#define MAX_INCLUDED 256
+#define MAX_DEFINES  16
+#define MAX_INCLUDED 16
 #define OUTPUT_SIZE  (1024 * 1024 * 4)
+#define MAX_IMPORTS 16
+#define MAX_IF_DEPTH 64
 
-/* ── #import: список .o файлов для линковки ── */
-#define MAX_IMPORTS 64
-static char g_import_objects[MAX_IMPORTS][512];
-static const char *g_import_ptrs[MAX_IMPORTS]; /* <-- Добавляем настоящий массив указателей */
+int compile_file(const char *input_file, const char *link_flags,
+                 const char *target, int is_import, void *sym_buffer, int *sym_c, void* overls, int* overls_c);
+
+/* ── Глобальные переменные для линковки всего проекта ── */
+static char (*g_import_objects)[512] = NULL;
+static const char **g_import_ptrs = NULL;
 static int  g_import_count = 0;
+static char g_target[256] = "";
 
 const char **preprocess_get_imports(int *count) {
     *count = g_import_count;
-    /* Перед возвратом честно расставляем указатели на начала строк */
+    if (g_import_count == 0 || !g_import_objects) return NULL;
     for (int i = 0; i < g_import_count; i++) {
         g_import_ptrs[i] = g_import_objects[i];
     }
-    return g_import_ptrs; /* Возвращаем правильный тип */
+    return g_import_ptrs;
 }
-
-static char g_target[256] = "";
 
 const char *preprocess_get_target(void) {
     return g_target[0] ? g_target : NULL;
@@ -54,83 +57,105 @@ static int triple_matches(const char *name) {
     return 0;
 }
 
-#define MAX_IF_DEPTH 64
-
+/* ── Контекст препроцессора (изолирует состояние каждого файла) ── */
 typedef struct {
     int active;
     int done;
     int parent_active;
 } IfFrame;
 
-static IfFrame if_stack[MAX_IF_DEPTH];
-static int     if_depth = 0;
-
-static int currently_active(void) {
-    for (int k = 0; k < if_depth; k++)
-        if (!if_stack[k].active) return 0;
-    return 1;
-}
-
 typedef struct {
     char name[64];
     char value[256];
 } Define;
 
-static Define defines[MAX_DEFINES];
-static int    define_count = 0;
+typedef struct {
+    char *out;
+    size_t output_size;
+    size_t out_i;
 
-static char included_files[MAX_INCLUDED][512];
-static int  included_count = 0;
+    Define *defines;
+    size_t define_count;
+    size_t max_defines;
 
-static int already_included(const char *canon_path) {
-    for (int i = 0; i < included_count; i++)
-        if (strcmp(included_files[i], canon_path) == 0)
+    IfFrame *if_stack;
+    size_t if_depth;
+    size_t max_if_depth;
+
+    char (*included_files)[512];
+    size_t included_count;
+    size_t max_includes;
+} PreprocCtx;
+
+
+static int currently_active(PreprocCtx *ctx) {
+    for (size_t k = 0; k < ctx->if_depth; k++)
+        if (!ctx->if_stack[k].active) return 0;
+    return 1;
+}
+
+static int already_included(PreprocCtx *ctx, const char *canon_path) {
+    for (size_t i = 0; i < ctx->included_count; i++)
+        if (strcmp(ctx->included_files[i], canon_path) == 0)
             return 1;
     return 0;
 }
 
-static void mark_included(const char *canon_path) {
-    if (included_count >= MAX_INCLUDED) return;
-    strncpy(included_files[included_count++], canon_path, 511);
+static void mark_included(PreprocCtx *ctx, const char *canon_path) {
+    if (ctx->included_count >= ctx->max_includes) {
+        ctx->max_includes *= 2;
+        char (*re_included_files)[512] = realloc(ctx->included_files, ctx->max_includes * 512);
+        if (!re_included_files) {
+            fprintf(stderr, "preprocessor: out of memory in includes\n");
+            exit(1);
+        }
+        ctx->included_files = re_included_files;
+    }
+    strncpy(ctx->included_files[ctx->included_count++], canon_path, 511);
 }
 
-static void define_push(const char *name, const char *value) {
-    for (int i = 0; i < define_count; i++) {
-        if (strcmp(defines[i].name, name) == 0) {
-            strncpy(defines[i].value, value, 255);
+static void define_push(PreprocCtx *ctx, const char *name, const char *value) {
+    for (size_t i = 0; i < ctx->define_count; i++) {
+        if (strcmp(ctx->defines[i].name, name) == 0) {
+            strncpy(ctx->defines[i].value, value, 255);
             return;
         }
     }
-    if (define_count >= MAX_DEFINES) {
-        fprintf(stderr, "preprocessor: define table overflow\n");
-        return;
+    if (ctx->define_count >= ctx->max_defines) {
+        ctx->max_defines *= 2;
+        Define *re_defines = realloc(ctx->defines, ctx->max_defines * sizeof(Define));
+        if (!re_defines) {
+            fprintf(stderr, "preprocessor: define table overflow\n");
+            exit(1);
+        }
+        ctx->defines = re_defines;
     }
-    strncpy(defines[define_count].name,  name,  63);
-    strncpy(defines[define_count].value, value, 255);
-    define_count++;
+    strncpy(ctx->defines[ctx->define_count].name,  name,  63);
+    strncpy(ctx->defines[ctx->define_count].value, value, 255);
+    ctx->define_count++;
 }
 
-static void define_remove(const char *name) {
-    for (int i = 0; i < define_count; i++) {
-        if (strcmp(defines[i].name, name) == 0) {
-            for (int j = i; j < define_count - 1; j++)
-                defines[j] = defines[j + 1];
-            define_count--;
+static void define_remove(PreprocCtx *ctx, const char *name) {
+    for (size_t i = 0; i < ctx->define_count; i++) {
+        if (strcmp(ctx->defines[i].name, name) == 0) {
+            for (size_t j = i; j < ctx->define_count - 1; j++)
+                ctx->defines[j] = ctx->defines[j + 1];
+            ctx->define_count--;
             return;
         }
     }
 }
 
-static const char *define_lookup(const char *name) {
-    for (int i = define_count - 1; i >= 0; i--)
-        if (strcmp(defines[i].name, name) == 0)
-            return defines[i].value;
+static const char *define_lookup(PreprocCtx *ctx, const char *name) {
+    for (int i = ctx->define_count - 1; i >= 0; i--)
+        if (strcmp(ctx->defines[i].name, name) == 0)
+            return ctx->defines[i].value;
     return NULL;
 }
 
-static int define_defined(const char *name) {
-    for (int i = 0; i < define_count; i++)
-        if (strcmp(defines[i].name, name) == 0)
+static int define_defined(PreprocCtx *ctx, const char *name) {
+    for (size_t i = 0; i < ctx->define_count; i++)
+        if (strcmp(ctx->defines[i].name, name) == 0)
             return 1;
     return 0;
 }
@@ -139,31 +164,32 @@ void preprocess_set_target(const char *triple) {
     if (triple && triple[0]) {
         strncpy(g_target, triple, sizeof(g_target) - 1);
         g_target[sizeof(g_target) - 1] = '\0';
-
-        /* Регистрируем каждый компонент triple как дефайн.
-         * strtok_r / strtok_s — портируемый вариант без strsep. */
-        char buf[256];
-        strncpy(buf, triple, sizeof(buf) - 1);
-        buf[sizeof(buf) - 1] = '\0';
-#ifdef _WIN32
-        char *saveptr = NULL;
-        char *tok = strtok_s(buf, "-", &saveptr);
-#else
-        char *saveptr = NULL;
-        char *tok = strtok_r(buf, "-", &saveptr);
-#endif
-        while (tok) {
-            define_push(tok, tok);
-#ifdef _WIN32
-            tok = strtok_s(NULL, "-", &saveptr);
-#else
-            tok = strtok_r(NULL, "-", &saveptr);
-#endif
-        }
-        define_push(triple, triple);
     } else {
         g_target[0] = '\0';
     }
+}
+
+static void inject_target_defines(PreprocCtx *ctx) {
+    if (!g_target[0]) return;
+    char buf[256];
+    strncpy(buf, g_target, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+#ifdef _WIN32
+    char *saveptr = NULL;
+    char *tok = strtok_s(buf, "-", &saveptr);
+#else
+    char *saveptr = NULL;
+    char *tok = strtok_r(buf, "-", &saveptr);
+#endif
+    while (tok) {
+        define_push(ctx, tok, tok);
+#ifdef _WIN32
+        tok = strtok_s(NULL, "-", &saveptr);
+#else
+        tok = strtok_r(NULL, "-", &saveptr);
+#endif
+    }
+    define_push(ctx, g_target, g_target);
 }
 
 static char *read_file(const char *path) {
@@ -183,22 +209,24 @@ static char *read_file(const char *path) {
     return buf;
 }
 
-static int preprocess_internal(const char *source, const char *base_dir,
-                                char *out, int *out_i)
+static int preprocess_internal(PreprocCtx *ctx, const char *source, const char *base_dir)
 {
     int src_i   = 0;
     int src_len = (int)strlen(source);
 
-    /* Макрос безопасной записи в out: проверяет границу перед каждым байтом */
-#define OUT_PUSH(ch) do { \
-    if (*out_i >= OUTPUT_SIZE - 1) { \
-        fprintf(stderr, "preprocessor: output buffer overflow\n"); \
-        return -1; \
-    } \
-    out[(*out_i)++] = (ch); \
+#define OUT_PUSH(ch) do {            \
+    if (ctx->out_i >= ctx->output_size - 1) { \
+        ctx->output_size *= 2;            \
+        char *re_out = realloc(ctx->out, ctx->output_size * sizeof(char));      \
+        if (!re_out) {                                                 \
+            fprintf(stderr, "preprocessor: output buffer overflow\n"); \
+            exit(1);        \
+        }                   \
+        ctx->out = re_out;       \
+    }                       \
+    ctx->out[(ctx->out_i)++] = (ch); \
 } while (0)
 
-    /* Макрос безопасного накопления строки: обрезает с ошибкой */
 #define STR_PUSH(buf, idx, maxlen, ch) do { \
     if ((idx) < (maxlen) - 1) { (buf)[(idx)++] = (ch); } \
 } while (0)
@@ -206,9 +234,8 @@ static int preprocess_internal(const char *source, const char *base_dir,
     while (src_i < src_len) {
 
         /* --- однострочный комментарий --- */
-        if (source[src_i] == '/' &&
-            src_i + 1 < src_len && source[src_i + 1] == '/') {
-            if (currently_active()) {
+        if (source[src_i] == '/' && src_i + 1 < src_len && source[src_i + 1] == '/') {
+            if (currently_active(ctx)) {
                 while (src_i < src_len && source[src_i] != '\n')
                     OUT_PUSH(source[src_i++]);
             } else {
@@ -219,17 +246,13 @@ static int preprocess_internal(const char *source, const char *base_dir,
         }
 
         /* --- блочный комментарий --- */
-        if (source[src_i] == '/' &&
-            src_i + 1 < src_len && source[src_i + 1] == '*') {
-            int comment_line = 0; /* для диагностики — не отслеживаем номер строки здесь */
-            (void)comment_line;
-            if (currently_active()) {
+        if (source[src_i] == '/' && src_i + 1 < src_len && source[src_i + 1] == '*') {
+            if (currently_active(ctx)) {
                 OUT_PUSH(source[src_i++]);
                 OUT_PUSH(source[src_i++]);
                 int closed = 0;
                 while (src_i < src_len) {
-                    if (source[src_i] == '*' &&
-                        src_i + 1 < src_len && source[src_i + 1] == '/') {
+                    if (source[src_i] == '*' && src_i + 1 < src_len && source[src_i + 1] == '/') {
                         OUT_PUSH(source[src_i++]);
                         OUT_PUSH(source[src_i++]);
                         closed = 1;
@@ -243,8 +266,7 @@ static int preprocess_internal(const char *source, const char *base_dir,
                 src_i += 2;
                 int closed = 0;
                 while (src_i < src_len) {
-                    if (source[src_i] == '*' &&
-                        src_i + 1 < src_len && source[src_i + 1] == '/') {
+                    if (source[src_i] == '*' && src_i + 1 < src_len && source[src_i + 1] == '/') {
                         src_i += 2; closed = 1; break;
                     }
                     src_i++;
@@ -255,9 +277,9 @@ static int preprocess_internal(const char *source, const char *base_dir,
             continue;
         }
 
-        /* --- строковый литерал (не раскрываем макросы внутри) --- */
+        /* --- строковый литерал --- */
         if (source[src_i] == '"') {
-            if (currently_active()) {
+            if (currently_active(ctx)) {
                 OUT_PUSH(source[src_i++]);
                 while (src_i < src_len && source[src_i] != '"') {
                     if (source[src_i] == '\\' && src_i + 1 < src_len)
@@ -277,9 +299,9 @@ static int preprocess_internal(const char *source, const char *base_dir,
             continue;
         }
 
-        /* --- символьный литерал (не раскрываем макросы внутри) --- */
+        /* --- символьный литерал --- */
         if (source[src_i] == '\'') {
-            if (currently_active()) {
+            if (currently_active(ctx)) {
                 OUT_PUSH(source[src_i++]);
                 while (src_i < src_len && source[src_i] != '\'') {
                     if (source[src_i] == '\\' && src_i + 1 < src_len)
@@ -302,88 +324,86 @@ static int preprocess_internal(const char *source, const char *base_dir,
         /* --- директива # --- */
         if (source[src_i] == '#') {
             src_i++;
-            while (src_i < src_len &&
-                   (source[src_i] == ' ' || source[src_i] == '\t')) src_i++;
+            while (src_i < src_len && (source[src_i] == ' ' || source[src_i] == '\t')) src_i++;
 
             char directive[32] = {0};
             int  di = 0;
-            while (src_i < src_len &&
-                   source[src_i] != ' '  &&
-                   source[src_i] != '\t' &&
-                   source[src_i] != '\n') {
+            while (src_i < src_len && source[src_i] != ' ' && source[src_i] != '\t' && source[src_i] != '\n') {
                 STR_PUSH(directive, di, (int)sizeof(directive), source[src_i]);
                 src_i++;
             }
             directive[di] = '\0';
 
-            while (src_i < src_len &&
-                   (source[src_i] == ' ' || source[src_i] == '\t')) src_i++;
+            while (src_i < src_len && (source[src_i] == ' ' || source[src_i] == '\t')) src_i++;
 
             if (strcmp(directive, "ifdef") == 0) {
                 char name[256] = {0}; int ni = 0;
-                while (src_i < src_len &&
-                       source[src_i] != ' ' &&
-                       source[src_i] != '\t' &&
-                       source[src_i] != '\n') {
+                while (src_i < src_len && source[src_i] != ' ' && source[src_i] != '\t' && source[src_i] != '\n') {
                     STR_PUSH(name, ni, (int)sizeof(name), source[src_i]);
                     src_i++;
                 }
                 name[ni] = '\0';
 
-                if (if_depth >= MAX_IF_DEPTH) {
-                    fprintf(stderr, "preprocessor: #ifdef nesting too deep\n");
-                } else {
-                    int parent = currently_active();
-                    int cond = (strchr(name, '-') || strchr(name, '.'))
-                               ? triple_matches(name)
-                               : define_defined(name);
-                    if_stack[if_depth].active        = parent && cond;
-                    if_stack[if_depth].done          = parent && cond;
-                    if_stack[if_depth].parent_active = parent;
-                    if_depth++;
+                if (ctx->if_depth >= ctx->max_if_depth) {
+                    ctx->max_if_depth *= 2;
+                    IfFrame *re_if_stack = realloc(ctx->if_stack, sizeof(IfFrame) * ctx->max_if_depth);
+                    if (!re_if_stack) {
+                        fprintf(stderr, "preprocessor: out of memory in #if* stack");
+                        exit(1);
+                    }
+                    ctx->if_stack = re_if_stack;
                 }
+                int parent = currently_active(ctx);
+                int cond = (strchr(name, '-') || strchr(name, '.'))
+                           ? triple_matches(name)
+                           : define_defined(ctx, name);
+                ctx->if_stack[ctx->if_depth].active        = parent && cond;
+                ctx->if_stack[ctx->if_depth].done          = parent && cond;
+                ctx->if_stack[ctx->if_depth].parent_active = parent;
+                ctx->if_depth++;
             }
             else if (strcmp(directive, "ifndef") == 0) {
                 char name[256] = {0}; int ni = 0;
-                while (src_i < src_len &&
-                       source[src_i] != ' ' &&
-                       source[src_i] != '\t' &&
-                       source[src_i] != '\n') {
+                while (src_i < src_len && source[src_i] != ' ' && source[src_i] != '\t' && source[src_i] != '\n') {
                     STR_PUSH(name, ni, (int)sizeof(name), source[src_i]);
                     src_i++;
                 }
                 name[ni] = '\0';
 
-                if (if_depth >= MAX_IF_DEPTH) {
-                    fprintf(stderr, "preprocessor: #ifndef nesting too deep\n");
-                } else {
-                    int parent = currently_active();
-                    int cond = (strchr(name, '-') || strchr(name, '.'))
-                               ? !triple_matches(name)
-                               : !define_defined(name);
-                    if_stack[if_depth].active        = parent && cond;
-                    if_stack[if_depth].done          = parent && cond;
-                    if_stack[if_depth].parent_active = parent;
-                    if_depth++;
+                if (ctx->if_depth >= ctx->max_if_depth) {
+                    ctx->max_if_depth *= 2;
+                    IfFrame *re_if_stack = realloc(ctx->if_stack, sizeof(IfFrame) * ctx->max_if_depth);
+                    if (!re_if_stack) {
+                        fprintf(stderr, "preprocessor: out of memory in #if* stack");
+                        exit(1);
+                    }
+                    ctx->if_stack = re_if_stack;
                 }
+                int parent = currently_active(ctx);
+                int cond = (strchr(name, '-') || strchr(name, '.'))
+                           ? !triple_matches(name)
+                           : !define_defined(ctx, name);
+                ctx->if_stack[ctx->if_depth].active        = parent && cond;
+                ctx->if_stack[ctx->if_depth].done          = parent && cond;
+                ctx->if_stack[ctx->if_depth].parent_active = parent;
+                ctx->if_depth++;
             }
             else if (strcmp(directive, "else") == 0) {
-                if (if_depth == 0) {
+                if (ctx->if_depth == 0) {
                     fprintf(stderr, "preprocessor: #else without #ifdef/#ifndef\n");
                 } else {
-                    IfFrame *fr = &if_stack[if_depth - 1];
+                    IfFrame *fr = &ctx->if_stack[ctx->if_depth - 1];
                     fr->active = fr->parent_active && !fr->done;
                     if (fr->active) fr->done = 1;
                 }
             }
             else if (strcmp(directive, "endif") == 0) {
-                if (if_depth == 0)
+                if (ctx->if_depth == 0)
                     fprintf(stderr, "preprocessor: #endif without #ifdef/#ifndef\n");
                 else
-                    if_depth--;
+                    ctx->if_depth--;
             }
             else if (strcmp(directive, "import") == 0) {
-                /* #import "module" — компилирует module.fl → module.o, линкует статически */
                 char filename[256] = {0}; int fi = 0;
                 if (src_i >= src_len) goto skip_newline;
                 char delim = source[src_i++];
@@ -395,42 +415,46 @@ static int preprocess_internal(const char *source, const char *base_dir,
                 filename[fi] = '\0';
                 if (src_i < src_len && source[src_i] == end) src_i++;
 
-                if (currently_active()) {
-                    /* Строим путь к .fl файлу */
+                if (currently_active(ctx)) {
                     char src_path[512];
                     if (base_dir && base_dir[0])
                         snprintf(src_path, sizeof(src_path), "%s/%s", base_dir, filename);
                     else
                         snprintf(src_path, sizeof(src_path), "%s", filename);
 
-                    /* Объектный файл — рядом с исходником */
                     char obj_path[512];
                     if (base_dir && base_dir[0])
                         snprintf(obj_path, sizeof(obj_path), "%s/%s.o", base_dir, filename);
                     else
                         snprintf(obj_path, sizeof(obj_path), "%s.o", filename);
 
-                    /* Проверяем, не импортировали ли уже */
                     int already = 0;
                     for (int ii = 0; ii < g_import_count; ii++)
                         if (strcmp(g_import_objects[ii], obj_path) == 0) { already = 1; break; }
 
                     if (!already) {
-                        /* Компилируем импортируемый файл */
-                        char cmd[1024];
-                        snprintf(cmd, sizeof(cmd), "./flame -c \"%s\"", src_path);
-                        int rc2 = system(cmd);
-                        if (rc2 != 0)
+                        char src_no_ext[512];
+                        strncpy(src_no_ext, src_path, sizeof(src_no_ext) - 1);
+                        src_no_ext[sizeof(src_no_ext) - 1] = '\0';
+                        char *dot = strrchr(src_no_ext, '.');
+                        if (dot && strcmp(dot, ".fl") == 0) *dot = '\0';
+
+                        int tmp = compile_file(src_no_ext, "", g_target, 1, 
+                                            NULL, NULL, NULL, NULL);
+
+                        if (tmp != 0) {
                             fprintf(stderr, "preprocessor: #import: failed to compile '%s'\n", src_path);
-                        else if (g_import_count < MAX_IMPORTS) {
-                            strncpy(g_import_objects[g_import_count++], obj_path,
-                                    sizeof(g_import_objects[0]) - 1);
-                            fprintf(stderr, "preprocessor: #import: queued '%s'\n", obj_path);
+                        } else {
+                            if (g_import_count < MAX_IMPORTS) {
+                                strncpy(g_import_objects[g_import_count++], obj_path, sizeof(g_import_objects[0]) - 1);
+                                fprintf(stderr, "preprocessor: #import: queued '%s'\n", obj_path);
+                            }
                         }
                     }
                 }
             }
-            else if (strcmp(directive, "include") == 0) {                char filename[256] = {0}; int fi = 0;
+            else if (strcmp(directive, "include") == 0) {
+                char filename[256] = {0}; int fi = 0;
                 if (src_i >= src_len) goto skip_newline;
                 char delim = source[src_i++];
                 char end   = (delim == '"') ? '"' : '>';
@@ -441,7 +465,7 @@ static int preprocess_internal(const char *source, const char *base_dir,
                 filename[fi] = '\0';
                 if (src_i < src_len && source[src_i] == end) src_i++;
 
-                if (currently_active()) {
+                if (currently_active(ctx)) {
                     char path[512];
                     if (base_dir && base_dir[0])
                         snprintf(path, sizeof(path), "%s/%s", base_dir, filename);
@@ -450,19 +474,20 @@ static int preprocess_internal(const char *source, const char *base_dir,
 
                     char canon[512] = {0};
                     if (!realpath(path, canon)) {
-                        /* realpath завершился с ошибкой — файл может не существовать,
-                         * используем нормализованный путь как есть */
                         strncpy(canon, path, sizeof(canon) - 1);
                         canon[sizeof(canon) - 1] = '\0';
                     }
 
-                    if (included_count >= MAX_INCLUDED) {
-                        fprintf(stderr,
-                            "preprocessor: #include table full, cannot include '%s'\n",
-                            canon);
-                    } else if (!already_included(canon)) {
-                        /* Регистрируем ДО рекурсии — защита от косвенных циклов */
-                        mark_included(canon);
+                    if (ctx->included_count >= ctx->max_includes) {
+                        ctx->max_includes *= 2;
+                        char (*re_included_files)[512] = realloc(ctx->included_files, ctx->max_includes * 512);
+                        if (!re_included_files) {
+                            fprintf(stderr, "preprocessor: out of memory in includes\n");
+                            exit(1);
+                        }
+                        ctx->included_files = re_included_files;
+                    } else if (!already_included(ctx, canon)) {
+                        mark_included(ctx, canon);
                         char *included_src = read_file(path);
                         if (included_src) {
                             char canon_copy[512];
@@ -476,29 +501,24 @@ static int preprocess_internal(const char *source, const char *base_dir,
                             } else {
                                 strncpy(new_base, ".", sizeof(new_base) - 1);
                             }
-                            int rc = preprocess_internal(included_src, new_base,
-                                                         out, out_i);
+                            /* Делим контекст с includ-ами, чтобы макросы шарились */
+                            int rc = preprocess_internal(ctx, included_src, new_base);
                             free(included_src);
                             if (rc < 0) return -1;
                             OUT_PUSH('\n');
                         }
                     }
-                    /* else: файл уже включён — тихо пропускаем (include guard) */
                 }
             }
             else if (strcmp(directive, "define") == 0) {
                 char name[256]  = {0}; int ni = 0;
-                while (src_i < src_len &&
-                       source[src_i] != ' ' &&
-                       source[src_i] != '\t' &&
-                       source[src_i] != '\n') {
+                while (src_i < src_len && source[src_i] != ' ' && source[src_i] != '\t' && source[src_i] != '\n') {
                     STR_PUSH(name, ni, (int)sizeof(name), source[src_i]);
                     src_i++;
                 }
                 name[ni] = '\0';
 
-                while (src_i < src_len &&
-                       (source[src_i] == ' ' || source[src_i] == '\t')) src_i++;
+                while (src_i < src_len && (source[src_i] == ' ' || source[src_i] == '\t')) src_i++;
 
                 char value[256] = {0}; int vi = 0;
                 while (src_i < src_len && source[src_i] != '\n') {
@@ -506,36 +526,32 @@ static int preprocess_internal(const char *source, const char *base_dir,
                     src_i++;
                 }
                 value[vi] = '\0';
-                /* убираем trailing пробелы */
                 while (vi > 0 && (value[vi-1] == ' ' || value[vi-1] == '\t'))
                     value[--vi] = '\0';
 
-                if (currently_active()) {
+                if (currently_active(ctx)) {
                     if (strcmp(name, "__target__") == 0 && value[0] != '\0') {
                         if (g_target[0] == '\0') {
                             strncpy(g_target, value, sizeof(g_target) - 1);
                             g_target[sizeof(g_target) - 1] = '\0';
-                            fprintf(stderr, "preprocessor: target triple = '%s'\n",
-                                    g_target);
+                            fprintf(stderr, "preprocessor: target triple = '%s'\n", g_target);
+                            inject_target_defines(ctx);
                         }
                     } else {
-                        define_push(name, value);
+                        define_push(ctx, name, value);
                     }
                 }
             }
             else if (strcmp(directive, "undef") == 0) {
                 char name[256] = {0}; int ni = 0;
-                while (src_i < src_len &&
-                       source[src_i] != ' ' &&
-                       source[src_i] != '\t' &&
-                       source[src_i] != '\n') {
+                while (src_i < src_len && source[src_i] != ' ' && source[src_i] != '\t' && source[src_i] != '\n') {
                     STR_PUSH(name, ni, (int)sizeof(name), source[src_i]);
                     src_i++;
                 }
                 name[ni] = '\0';
 
-                if (currently_active())
-                    define_remove(name);
+                if (currently_active(ctx))
+                    define_remove(ctx, name);
             }
             else {
                 fprintf(stderr, "preprocessor: unknown directive '#%s'\n", directive);
@@ -548,41 +564,46 @@ static int preprocess_internal(const char *source, const char *base_dir,
         }
 
         /* --- неактивная ветка --- */
-        if (!currently_active()) {
+        if (!currently_active(ctx)) {
             src_i++;
             continue;
         }
 
-        /* --- идентификатор: возможное раскрытие макроса --- */
+        /* --- идентификатор --- */
         if (isalpha((unsigned char)source[src_i]) || source[src_i] == '_') {
             char word[256] = {0}; int wi = 0;
-            while (src_i < src_len &&
-                   (isalnum((unsigned char)source[src_i]) || source[src_i] == '_')) {
+            while (src_i < src_len && (isalnum((unsigned char)source[src_i]) || source[src_i] == '_')) {
                 STR_PUSH(word, wi, (int)sizeof(word), source[src_i]);
                 src_i++;
             }
             word[wi] = '\0';
 
-            const char *repl = define_lookup(word);
+            const char *repl = define_lookup(ctx, word);
             if (repl && strcmp(repl, word) != 0) {
-                /* Раскрываем только если замена отличается от имени —
-                 * это предотвращает бесконечную рекурсию для A→A */
                 int rlen = (int)strlen(repl);
-                if (*out_i + rlen >= OUTPUT_SIZE - 1) {
-                    fprintf(stderr, "preprocessor: output buffer overflow "
-                            "during macro expansion of '%s'\n", word);
-                    return -1;
+                if (ctx->out_i + rlen >= ctx->output_size - 1) {
+                    ctx->output_size *= 2;
+                    char *re_out = realloc(ctx->out, ctx->output_size * sizeof(char));
+                    if (!re_out) {
+                        fprintf(stderr, "preprocessor: output buffer overflow\n");
+                        exit(1);
+                    }
+                    ctx->out = re_out;
                 }
-                memcpy(out + *out_i, repl, rlen);
-                *out_i += rlen;
+                memcpy(ctx->out + ctx->out_i, repl, rlen);
+                ctx->out_i += rlen;
             } else {
-                /* нет замены или замена совпадает с именем — выводим как есть */
-                if (*out_i + wi >= OUTPUT_SIZE - 1) {
-                    fprintf(stderr, "preprocessor: output buffer overflow\n");
-                    return -1;
+                if (ctx->out_i + wi >= ctx->output_size - 1) {
+                    ctx->output_size *= 2;
+                    char *re_out = realloc(ctx->out, ctx->output_size * sizeof(char));
+                    if (!re_out) {
+                        fprintf(stderr, "preprocessor: output buffer overflow\n");
+                        exit(1);
+                    }
+                    ctx->out = re_out;
                 }
-                memcpy(out + *out_i, word, wi);
-                *out_i += wi;
+                memcpy(ctx->out + ctx->out_i, word, wi);
+                ctx->out_i += wi;
             }
             continue;
         }
@@ -590,43 +611,68 @@ static int preprocess_internal(const char *source, const char *base_dir,
         OUT_PUSH(source[src_i++]);
     }
 
-    if (if_depth > 0)
-        fprintf(stderr, "preprocessor: warning: %d unclosed #ifdef/#ifndef\n",
-                if_depth);
-
 #undef OUT_PUSH
 #undef STR_PUSH
     return 0;
 }
 
 char *preprocess(const char *source, const char *base_dir) {
-    included_count = 0;
-    if_depth       = 0;
-    define_count   = 0;   /* сброс дефайнов между вызовами */
-    g_import_count = 0;   /* сброс списка #import */
-
-    /* target-defines выставляются снаружи через preprocess_set_target()
-     * до вызова preprocess(), поэтому их нужно восстановить после сброса. */
-    if (g_target[0]) {
-        char saved[256];
-        strncpy(saved, g_target, sizeof(saved) - 1);
-        saved[sizeof(saved) - 1] = '\0';
-        preprocess_set_target(saved);
+    /* Ленивая инициализация глобального массива импортов (один раз на весь компилятор) */
+    if (!g_import_objects) {
+        g_import_objects = malloc(MAX_IMPORTS * 512);
+        g_import_ptrs    = malloc(MAX_IMPORTS * 512);
+        g_import_count   = 0;
     }
 
-    char *out = malloc(OUTPUT_SIZE);
-    if (!out) {
+    /* Изолированный контекст конкретно для этого файла */
+    PreprocCtx ctx;
+    ctx.included_count = 0;
+    ctx.if_depth       = 0;
+    ctx.define_count   = 0;
+    ctx.out_i          = 0;
+
+    ctx.max_defines  = MAX_DEFINES;
+    ctx.max_includes = MAX_INCLUDED;
+    ctx.output_size  = OUTPUT_SIZE;
+    ctx.max_if_depth = MAX_IF_DEPTH;
+
+    ctx.defines        = malloc(sizeof(Define) * MAX_DEFINES);
+    ctx.included_files = malloc(MAX_INCLUDED * 512);
+    ctx.out            = malloc(OUTPUT_SIZE * sizeof(char));
+    ctx.if_stack       = malloc(sizeof(IfFrame) * MAX_IF_DEPTH);
+
+    if (!ctx.out || !ctx.defines || !ctx.included_files || !ctx.if_stack) {
         fprintf(stderr, "preprocessor: out of memory\n");
         return NULL;
     }
 
-    int out_i = 0;
-    int rc = preprocess_internal(source, base_dir, out, &out_i);
+    /* Подхватываем таргет-макросы (если они уже установлены) */
+    inject_target_defines(&ctx);
+
+    int rc = preprocess_internal(&ctx, source, base_dir);
+    
+    if (ctx.if_depth > 0) {
+        fprintf(stderr, "preprocessor: unclosed #ifdef/#ifndef\n");
+        rc = -1;
+    }
+
     if (rc < 0) {
-        free(out);
+        free(ctx.out);
+        free(ctx.defines);
+        free(ctx.included_files);
+        free(ctx.if_stack);
         return NULL;
     }
-    out[out_i] = '\0';
+    
+    ctx.out[ctx.out_i] = '\0';
 
-    return out;
+    /* Очищаем структуры данных, принадлежавшие ТОЛЬКО этому контексту */
+    free(ctx.defines);
+    free(ctx.included_files);
+    free(ctx.if_stack);
+
+    /* Обрати внимание: мы НЕ делаем free(g_import_ptrs) и free(g_import_objects).
+     * Они живут до завершения всей программы, чтобы линковщик мог их забрать. */
+
+    return ctx.out;
 }

@@ -11,12 +11,34 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_SYMS 256
+#define MAX_SYMS  64
 #define MAX_TYPES 64
+
+int g_is_import = 0;
 
 static LLVMTypeRef g_T_struct_type = NULL;
 static LLVMTargetDataRef g_data_layout = NULL;
 static int get_field_index(LLVMTypeRef struct_type, const char *field_name);
+
+extern OverloadEntry* global_modules_overloads[];
+extern int global_modules_counts[];
+extern int num_imported_modules;
+
+// Функция для поиска перегрузки по искаженному имени (mangled name) в импортированных модулях
+static OverloadEntry* find_extern_overload(const char* mangled_name) {
+    for (int m = 0; m < num_imported_modules; m++) {
+        OverloadEntry *mod_overloads = global_modules_overloads[m];
+        int mod_count = global_modules_counts[m];
+        
+        for (int i = 0; i < mod_count; i++) {
+            // Ищем совпадение по mangled-имени, так как в codegen приходит именно оно
+            if (strcmp(mod_overloads[i].mangled, mangled_name) == 0) {
+                return &mod_overloads[i]; // Нашли!
+            }
+        }
+    }
+    return NULL; // В импортированных модулях такой функции нет
+}
 
 typedef struct {
   char name[64];
@@ -186,32 +208,40 @@ typedef struct {
   int is_vla;
 } Symbol;
 
-static Symbol sym_table[MAX_SYMS];
-static int sym_count = 0;
+static Symbol *sym_table;
+static int *sym_count;
+static Symbol *external_sym_table = NULL;
+static int external_sym_count = 0;
 
 static void sym_push(const char *name, LLVMValueRef val, LLVMTypeRef type,
                      int is_func) {
-  if (sym_count >= MAX_SYMS) {
+  if (*sym_count >= MAX_SYMS) {
     fprintf(stderr, "codegen error: symbol table overflow\n");
     exit(1);
     return;
   }
-  strncpy(sym_table[sym_count].name, name, 63);
-  sym_table[sym_count].value = val;
-  sym_table[sym_count].type = type;
-  sym_table[sym_count].is_func = is_func;
-  sym_count++;
+  strncpy(sym_table[*sym_count].name, name, 63);
+  sym_table[*sym_count].value = val;
+  sym_table[*sym_count].type = type;
+  sym_table[*sym_count].is_func = is_func;
+  (*sym_count)++;
 }
 
 static Symbol *sym_lookup(const char *name) {
-  for (int j = sym_count - 1; j >= 0; j--)
+  for (int j = *sym_count - 1; j >= 0; j--)
     if (strcmp(sym_table[j].name, name) == 0)
       return &sym_table[j];
+
+  if (external_sym_table) {
+    for (int j = external_sym_count - 1; j >= 0; j--)
+      if (strcmp(external_sym_table[j].name, name) == 0)
+        return &external_sym_table[j];
+  }
   return NULL;
 }
 
-static int sym_checkpoint(void) { return sym_count; }
-static void sym_restore(int cp) { sym_count = cp; }
+static int sym_checkpoint(void) { return *sym_count; }
+static void sym_restore(int cp) { *sym_count = cp; }
 
 static LLVMBuilderRef builder;
 
@@ -727,9 +757,9 @@ static LLVMValueRef codegen_array_def(Node *n) {
       LLVMValueRef ptr = LLVMBuildAlloca(builder, arr_type, name);
       LLVMBuildStore(builder, LLVMConstNull(arr_type), ptr);
       sym_push(name, ptr, arr_type, 0);
-      sym_table[sym_count - 1].elem_type = fn_ptr_type;
-      sym_table[sym_count - 1].fn_type = fn_sig;
-      sym_table[sym_count - 1].is_vla = 0;
+      sym_table[*sym_count - 1].elem_type = fn_ptr_type;
+      sym_table[*sym_count - 1].fn_type = fn_sig;
+      sym_table[*sym_count - 1].is_vla = 0;
       return ptr;
     }
 
@@ -741,9 +771,9 @@ static LLVMValueRef codegen_array_def(Node *n) {
         LLVMBuildArrayAlloca(builder, fn_ptr_type, size_val, name);
     LLVMTypeRef ptr_type = LLVMPointerTypeInContext(ctx, 0);
     sym_push(name, ptr, ptr_type, 0);
-    sym_table[sym_count - 1].elem_type = fn_ptr_type;
-    sym_table[sym_count - 1].fn_type = fn_sig;
-    sym_table[sym_count - 1].is_vla = 1;
+    sym_table[*sym_count - 1].elem_type = fn_ptr_type;
+    sym_table[*sym_count - 1].fn_type = fn_sig;
+    sym_table[*sym_count - 1].is_vla = 1;
     return ptr;
   }
 
@@ -756,8 +786,8 @@ static LLVMValueRef codegen_array_def(Node *n) {
     LLVMValueRef ptr = LLVMBuildAlloca(builder, arr_type, name);
     LLVMBuildStore(builder, LLVMConstNull(arr_type), ptr);
     sym_push(name, ptr, arr_type, 0);
-    sym_table[sym_count - 1].elem_type = elem_type;
-    sym_table[sym_count - 1].is_vla = 0;
+    sym_table[*sym_count - 1].elem_type = elem_type;
+    sym_table[*sym_count - 1].is_vla = 0;
     return ptr;
   }
 
@@ -770,8 +800,8 @@ static LLVMValueRef codegen_array_def(Node *n) {
 
   LLVMTypeRef ptr_type = LLVMPointerTypeInContext(ctx, 0);
   sym_push(name, ptr, ptr_type, 0);
-  sym_table[sym_count - 1].elem_type = elem_type;
-  sym_table[sym_count - 1].is_vla = 1;
+  sym_table[*sym_count - 1].elem_type = elem_type;
+  sym_table[*sym_count - 1].is_vla = 1;
   return ptr;
 }
 
@@ -817,56 +847,42 @@ static LLVMValueRef codegen_func_call(Node *n) {
 
   LLVMValueRef func;
   LLVMTypeRef ftype;
+
   if (s && s->is_func) {
-    func = s->value;
-    ftype = s->type;
+      func = s->value;
+      ftype = s->type;
   } else {
-    func = LLVMGetNamedFunction(mod, fname);
-    if (!func) {
-      /* Последний шанс: fname мог быть результатом member_arrow/dot,
-         тогда last_loaded_fn_sig содержит сигнатуру функции, а
-         значение уже вычислено и лежит в args[0] через expr. */
-      if (last_loaded_fn_sig) {
-        /* Значение fn_ptr нужно получить через codegen_var */
-        Symbol *fs = sym_lookup(fname);
-        LLVMValueRef fn_ptr_val = NULL;
-        if (fs)
-          fn_ptr_val =
-              LLVMBuildLoad2(builder, LLVMPointerType(last_loaded_fn_sig, 0),
-                             fs->value, "fptr_m");
-        if (!fn_ptr_val) {
+      func = LLVMGetNamedFunction(mod, fname); // Пытаемся найти локально
+      
+      // ЕСЛИ ЛОКАЛЬНО НЕТ — ИЩЕМ В ИМПОРТАХ И ОБЪЯВЛЯЕМ
+      if (!func) {
+          // Здесь мы ищем fname (например, _success_) в global_modules_overloads
+          // (напишите небольшую вспомогательную функцию для поиска)
+          OverloadEntry* ext_func = find_extern_overload(fname); 
+          
+          if (ext_func) {
+              // Нашли в другом модуле! Строим сигнатуру LLVM и объявляем.
+              LLVMTypeRef ret_t = llvm_type_from_str(ext_func->ret_type);
+              LLVMTypeRef param_t[64];
+              for (int i = 0; i < ext_func->param_count; i++) {
+                  param_t[i] = llvm_type_from_str(ext_func->param_types[i]);
+              }
+              ftype = LLVMFunctionType(ret_t, param_t, ext_func->param_count, 0);
+              
+              // Создаем "заглушку" в текущем модуле, которая ссылается на внешний объектный файл
+              func = LLVMAddFunction(mod, fname, ftype);
+              LLVMSetLinkage(func, LLVMExternalLinkage); 
+          }
+      }
+
+      // Если все еще нет...
+      if (!func) {
+          // (Ваш существующий блок last_loaded_fn_sig или ошибка)
           fprintf(stderr, "codegen error: undefined function '%s'\n", fname);
           exit(1);
-          return NULL;
-        }
-        LLVMTypeRef sig = last_loaded_fn_sig;
-        LLVMTypeRef ptypes[64];
-        unsigned pcnt = LLVMCountParamTypes(sig);
-        if (pcnt > 0 && pcnt <= 64)
-          LLVMGetParamTypes(sig, ptypes);
-        LLVMValueRef cargs[64];
-        unsigned cargc = 0;
-        if (n->childs->size >= 2) {
-          Node *an = &n->childs->data[1];
-          for (unsigned long long j = 0; j < an->childs->size && cargc < 64;
-               j++) {
-            LLVMValueRef a = codegen_node(&an->childs->data[j]);
-            if (a) {
-              if (cargc < pcnt)
-                a = coerce_to(a, ptypes[cargc]);
-              cargs[cargc++] = a;
-            }
-          }
-        }
-        int rv = LLVMGetTypeKind(LLVMGetReturnType(sig)) == LLVMVoidTypeKind;
-        return LLVMBuildCall2(builder, sig, fn_ptr_val, cargs, cargc,
-                              rv ? "" : "fcall_m");
       }
-      fprintf(stderr, "codegen error: undefined function '%s'\n", fname);
-      exit(1);
-      return NULL;
-    }
-    ftype = LLVMGlobalGetValueType(func);
+      
+      ftype = LLVMGlobalGetValueType(func);
   }
 
   LLVMTypeRef param_types_arr[64];
@@ -1106,7 +1122,7 @@ static LLVMValueRef codegen_func_def(Node *n) {
   if (is_extern_c)
     LLVMSetLinkage(func, LLVMExternalLinkage);
   else if (strcmp(fname, "main") != 0) {
-    LLVMSetLinkage(func, LLVMInternalLinkage); 
+    LLVMSetLinkage(func, g_is_import ? LLVMExternalLinkage : LLVMInternalLinkage);
   }
 
   sym_push(fname, func, func_type, 1);
@@ -1134,11 +1150,11 @@ static LLVMValueRef codegen_func_def(Node *n) {
       LLVMValueRef slot = LLVMBuildAlloca(builder, arg_type, pname);
       LLVMBuildStore(builder, arg_val, slot);
 
-      if (sym_count < MAX_SYMS) {
-        strncpy(sym_table[sym_count].name, pname, 63);
-        sym_table[sym_count].value = slot;
-        sym_table[sym_count].type = arg_type;
-        sym_table[sym_count].elem_type = NULL;
+      if (*sym_count < MAX_SYMS) {
+        strncpy(sym_table[*sym_count].name, pname, 63);
+        sym_table[*sym_count].value = slot;
+        sym_table[*sym_count].type = arg_type;
+        sym_table[*sym_count].elem_type = NULL;
         if (LLVMGetTypeKind(arg_type) == LLVMPointerTypeKind) {
           char base[80];
           strncpy(base, ptype_str, 79);
@@ -1150,15 +1166,15 @@ static LLVMValueRef codegen_func_def(Node *n) {
             lookup += 8;
           LLVMTypeRef et = type_lookup(lookup);
           if (et)
-            sym_table[sym_count].elem_type = et;
+            sym_table[*sym_count].elem_type = et;
         }
-        sym_table[sym_count].is_func = 0;
-        sym_table[sym_count].is_vla = 0;
+        sym_table[*sym_count].is_func = 0;
+        sym_table[*sym_count].is_vla = 0;
 
         LLVMTypeRef fnsig = parse_ftype_str(ptype_str);
-        sym_table[sym_count].fn_type = fnsig;
+        sym_table[*sym_count].fn_type = fnsig;
 
-        sym_count++;
+        (*sym_count)++;
       }
     }
   }
@@ -1860,15 +1876,15 @@ static LLVMValueRef codegen_var_def(Node *n) {
         LLVMSetGlobalConstant(ptr, 1);
     }
 
-    if (sym_count < MAX_SYMS) {
-      strncpy(sym_table[sym_count].name, name, 63);
-      sym_table[sym_count].value = ptr;
-      sym_table[sym_count].type = ptr_type;
-      sym_table[sym_count].elem_type = NULL;
-      sym_table[sym_count].fn_type = fn_sig;
-      sym_table[sym_count].is_func = 0;
-      sym_table[sym_count].is_vla = 0;
-      sym_count++;
+    if (*sym_count < MAX_SYMS) {
+      strncpy(sym_table[*sym_count].name, name, 63);
+      sym_table[*sym_count].value = ptr;
+      sym_table[*sym_count].type = ptr_type;
+      sym_table[*sym_count].elem_type = NULL;
+      sym_table[*sym_count].fn_type = fn_sig;
+      sym_table[*sym_count].is_func = 0;
+      sym_table[*sym_count].is_vla = 0;
+      (*sym_count)++;
     }
     return ptr;
   }
@@ -1879,14 +1895,14 @@ static LLVMValueRef codegen_var_def(Node *n) {
   LLVMBasicBlockRef cur_block = LLVMGetInsertBlock(builder);
   if (cur_block) {
     LLVMValueRef ptr = LLVMBuildAlloca(builder, lltype, name);
-    if (sym_count < MAX_SYMS) {
-      strncpy(sym_table[sym_count].name, name, 63);
-      sym_table[sym_count].value = ptr;
-      sym_table[sym_count].type = lltype;
-      sym_table[sym_count].elem_type = elem_type;
-      sym_table[sym_count].fn_type = NULL;
-      sym_table[sym_count].is_func = 0;
-      sym_count++;
+    if (*sym_count < MAX_SYMS) {
+      strncpy(sym_table[*sym_count].name, name, 63);
+      sym_table[*sym_count].value = ptr;
+      sym_table[*sym_count].type = lltype;
+      sym_table[*sym_count].elem_type = elem_type;
+      sym_table[*sym_count].fn_type = NULL;
+      sym_table[*sym_count].is_func = 0;
+      (*sym_count)++;
     }
     if (n->childs->size >= 3 && n->childs->data[2].type != NODE_UNDEF) {
       if (n->childs->data[2].type == NODE_NEW) {
@@ -1918,14 +1934,14 @@ static LLVMValueRef codegen_var_def(Node *n) {
     }
     if (is_const)
       LLVMSetGlobalConstant(global_var, 1);
-    if (sym_count < MAX_SYMS) {
-      strncpy(sym_table[sym_count].name, name, 63);
-      sym_table[sym_count].value = global_var;
-      sym_table[sym_count].type = lltype;
-      sym_table[sym_count].elem_type = elem_type;
-      sym_table[sym_count].fn_type = NULL;
-      sym_table[sym_count].is_func = 0;
-      sym_count++;
+    if (*sym_count < MAX_SYMS) {
+      strncpy(sym_table[*sym_count].name, name, 63);
+      sym_table[*sym_count].value = global_var;
+      sym_table[*sym_count].type = lltype;
+      sym_table[*sym_count].elem_type = elem_type;
+      sym_table[*sym_count].fn_type = NULL;
+      sym_table[*sym_count].is_func = 0;
+      (*sym_count)++;
     }
     return global_var;
   }
@@ -3105,15 +3121,22 @@ static void init_all_targets(void) {
   LLVMInitializeAllAsmParsers();
 }
 
-void codegen(vector_node *nodes, const char *out_file,
-             const char *extra_link_flags, const char *target_triple, const char *passes) {
-  sym_count = 0;
+void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
+             const char *extra_link_flags, const char *target_triple, const char *passes, char flags) {
+  g_is_import = flags & 0b0001;
   type_count = 0;
   struct_info_count = 0;
   typedef_count = 0;
-  memset(sym_table, 0, sizeof(sym_table));
+  sym_table = malloc(sizeof(Symbol) * MAX_SYMS);
+  sym_count = malloc(sizeof(int)); *sym_count = 0;
   memset(type_table, 0, sizeof(type_table));
   memset(struct_info, 0, sizeof(struct_info));
+  memset(sym_table, 0, sizeof(Symbol) * MAX_SYMS);
+
+  if (sym && sym_c) {
+    external_sym_table = (Symbol*)sym;
+    external_sym_count = *sym_c;
+  }
 
   ctx = LLVMContextCreate();
   mod = LLVMModuleCreateWithNameInContext("flame", ctx);
@@ -3135,7 +3158,7 @@ void codegen(vector_node *nodes, const char *out_file,
     fprintf(stderr, "codegen: target error: %s\n", err_target);
     LLVMDisposeMessage(err_target);
     LLVMDisposeMessage(default_triple);
-    return;
+    return NULL;
   }
 
   LLVMTargetMachineRef machine = LLVMCreateTargetMachine(
@@ -3146,7 +3169,7 @@ void codegen(vector_node *nodes, const char *out_file,
     fprintf(stderr, "codegen: failed to create target machine for '%s'\n",
             triple);
     LLVMDisposeMessage(default_triple);
-    return;
+    return NULL;
   }
 
   g_data_layout = LLVMCreateTargetDataLayout(machine);
@@ -3248,29 +3271,43 @@ void codegen(vector_node *nodes, const char *out_file,
     LLVMDisposeMessage(err_msg);
   }
 
-  LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
-  LLVMErrorRef err = LLVMRunPasses(
-    mod, passes, machine, options
-  );
-
-  if (err != LLVMErrorSuccess) {
-    char *msg = LLVMGetErrorMessage(err);
-    printf("codegen: optimization error: %s\n", msg);
-    LLVMDisposeErrorMessage(msg);
-    exit(1);
+  if (passes[0] == '\0') {
+    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+    LLVMErrorRef err = LLVMRunPasses(
+      mod, "default<O1>", machine, options
+    );
+    if (err != LLVMErrorSuccess) {
+      char *msg = LLVMGetErrorMessage(err);
+      printf("codegen: optimization error: %s\n", msg);
+      LLVMDisposeErrorMessage(msg);
+      exit(1);
+    }
+  } else {
+    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+    LLVMErrorRef err = LLVMRunPasses(
+      mod, passes, machine, options
+    );
+    if (err != LLVMErrorSuccess) {
+      char *msg = LLVMGetErrorMessage(err);
+      printf("codegen: optimization error: %s\n", msg);
+      LLVMDisposeErrorMessage(msg);
+      exit(1);
+    }
   }
 
-  char ir_file[256];
-  snprintf(ir_file, sizeof(ir_file), "%s.ll", out_file);
-  char *ir = LLVMPrintModuleToString(mod);
-  if (ir) {
-    FILE *f = fopen(ir_file, "w");
-    if (f) {
-      fputs(ir, f);
-      fclose(f);
+  if (flags & 0b0010) {
+    char ir_file[256];
+    snprintf(ir_file, sizeof(ir_file), "%s.ll", out_file);
+    char *ir = LLVMPrintModuleToString(mod);
+    if (ir) {
+      FILE *f = fopen(ir_file, "w");
+      if (f) {
+        fputs(ir, f);
+        fclose(f);
+      }
+      fprintf(stderr, "codegen: wrote IR '%s'\n", ir_file);
+      LLVMDisposeMessage(ir);
     }
-    fprintf(stderr, "codegen: wrote IR '%s'\n", ir_file);
-    LLVMDisposeMessage(ir);
   }
 
   char obj_file[256];
@@ -3284,11 +3321,11 @@ void codegen(vector_node *nodes, const char *out_file,
   } else {
     fprintf(stderr, "codegen: wrote object '%s'\n", obj_file);
 
-    /* ПРОВЕРКА: Если нет функции main, это библиотека, пропускаем линковку! */
-    if (!LLVMGetNamedFunction(mod, "main")) {
-        fprintf(stderr, "codegen: no 'main' function found, skipping linking (module built as .o).\n");
+    int has_main = (LLVMGetNamedFunction(mod, "main") != NULL);
+
+    if (g_is_import || !has_main) {
+        fprintf(stderr, "codegen: no 'main' function found or module is imported, skipping linking (module built as .o).\n");
     } else {
-        /* Собираем .o файлы из #import */
         int import_count = 0;
         const char **import_objects = preprocess_get_imports(&import_count);
         char import_flags[2048] = "";
@@ -3312,6 +3349,20 @@ void codegen(vector_node *nodes, const char *out_file,
         else
           fprintf(stderr, "codegen: linked '%s'\n", out_file);
     }
+
+    int keep_objects = (flags & 0b0100);
+    if (!g_is_import && !keep_objects) {
+        if (has_main) {
+            remove(obj_file);
+        }
+                int import_count = 0;
+        const char **import_objects = preprocess_get_imports(&import_count);
+        if (import_objects) {
+            for (int ii = 0; ii < import_count; ii++) {
+                remove(import_objects[ii]);
+            }
+        }
+    }
   }
 
   LLVMDisposeTargetData(g_data_layout);
@@ -3319,4 +3370,14 @@ void codegen(vector_node *nodes, const char *out_file,
   LLVMDisposeBuilder(builder);
   LLVMDisposeModule(mod);
   LLVMContextDispose(ctx);
+
+  if (g_is_import) {
+    void **ret = malloc(sizeof(void*) * 2);
+    ret[0] = sym_table;
+    ret[1] = sym_count;
+    return ret;
+  }
+  else {
+    return NULL;
+  }
 }

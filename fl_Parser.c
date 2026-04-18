@@ -4,8 +4,14 @@
 #include <string.h>
 #include <ctype.h>
 
+#define MAX_OVERLOADS        16
+
 static int i;
 static vector_token *tokens;
+
+extern OverloadEntry* global_modules_overloads[];
+extern int global_modules_counts[];
+extern int num_imported_modules;
 
 static Token peek(int padding) {
     if (i + padding >= 0 && (unsigned)(i + padding) < tokens->size)
@@ -39,9 +45,6 @@ static const char *var_type_lookup(const char *var) {
             return var_types[j].type;
     return NULL;
 }
-
-#define MAX_OVERLOADS      256
-#define MAX_OVERLOAD_PARAMS 16
 
 typedef struct {
     const char *prefix;
@@ -87,16 +90,7 @@ static int triple_has_component(const char *triple, const char *component) {
     return 0;
 }
 
-typedef struct {
-    char base_name[64];
-    char mangled[128];
-    char param_types[MAX_OVERLOAD_PARAMS][64];
-    int  param_count;
-    char ret_type[64];
-    int  is_static;
-} OverloadEntry;
-
-static OverloadEntry overload_table[MAX_OVERLOADS];
+static OverloadEntry *overload_table;
 static int           overload_count = 0;
 
 static void overload_push(const char *base, const char *mangled,
@@ -233,10 +227,24 @@ static const char *resolve_overload(const char *base, Node *args_node)
 
     OverloadEntry *candidates[MAX_OVERLOADS];
     int cand_count = 0;
+
     for (int i = 0; i < overload_count; i++) {
-        if (strcmp(overload_table[i].base_name, base) == 0 &&
-            overload_table[i].param_count == argc)
+        if (strcmp(overload_table[i].base_name, base) == 0 && overload_table[i].param_count == argc)
             candidates[cand_count++] = &overload_table[i];
+    }
+
+    if (cand_count == 0) {
+        for (int m = 0; m < num_imported_modules; m++) {
+            OverloadEntry *mod_overloads = global_modules_overloads[m];
+            int mod_count = global_modules_counts[m];
+            for (int i = 0; i < mod_count; i++) {
+                if (strcmp(mod_overloads[i].base_name, base) == 0 && mod_overloads[i].param_count == argc) {
+                    if (cand_count < MAX_OVERLOADS) {
+                        candidates[cand_count++] = &mod_overloads[i];
+                    }
+                }
+            }
+        }
     }
 
     if (cand_count == 0) return NULL;
@@ -1566,12 +1574,19 @@ Node parsePtrAssign(void) {
     return assign;
 }
 
-vector_node *parse(int it, vector_token* tokenss) {
+void **parse(int it, vector_token* tokenss, int is_import, void *overloads, int *overloads_c) {
     i = it;
     tokens = tokenss;
     var_type_count    = 0;
     known_class_count = 0;
-    overload_count    = 0;
+
+    if (overloads && overloads_c) {
+        overload_table = (OverloadEntry*)overloads;
+        overload_count = *overloads_c;
+    } else {
+        overload_table = malloc(sizeof(OverloadEntry) * MAX_OVERLOADS);
+        overload_count = 0;
+    }
 
     prescan(tokenss);
 
@@ -1607,7 +1622,22 @@ vector_node *parse(int it, vector_token* tokenss) {
         }
     }
 
-    return nodes;
+    if (is_import) {
+        void **tmp = malloc(sizeof(void*) * 3);
+        tmp[0] = nodes;
+        tmp[1] = overload_table;
+        
+        int *ret_count = malloc(sizeof(int));
+        *ret_count = overload_count;
+        tmp[2] = ret_count; 
+        
+        return tmp;
+    }
+    else {
+        void **tmp = malloc(sizeof(void*) * 1);
+        tmp[0] = nodes;
+        return tmp;
+    }
 }
 
 Node parseAssign(Token t) {
