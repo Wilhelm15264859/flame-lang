@@ -56,7 +56,8 @@ typedef struct {
   char parent_name[64];
 } StructInfo;
 
-static StructInfo struct_info[MAX_TYPES];
+static StructInfo *struct_info = NULL;
+static int max_struct_infos = MAX_TYPES;
 static int struct_info_count = 0;
 
 static StructInfo *find_struct_info_by_type(LLVMTypeRef type) {
@@ -67,19 +68,31 @@ static StructInfo *find_struct_info_by_type(LLVMTypeRef type) {
   return NULL;
 }
 
-static TypeEntry type_table[MAX_TYPES];
+static TypeEntry *type_table = NULL;
+static int max_types = MAX_TYPES;
 static int type_count = 0;
 
 /* ── typedef alias table ── */
 #define MAX_TYPEDEFS 64
 typedef struct { char alias[64]; char original[64]; } TypedefEntry;
-static TypedefEntry typedef_table[MAX_TYPEDEFS];
+
+static TypedefEntry *typedef_table = NULL;
+static int max_typedefs = MAX_TYPEDEFS;
 static int typedef_count = 0;
+
+static int max_syms = MAX_SYMS;
 
 static void typedef_push(const char *alias, const char *original) {
     for (int i = 0; i < typedef_count; i++)
         if (strcmp(typedef_table[i].alias, alias) == 0) return;
-    if (typedef_count >= MAX_TYPEDEFS) return;
+    if (typedef_count >= max_typedefs) {
+        max_typedefs *= 2;
+        typedef_table = realloc(typedef_table, sizeof(TypedefEntry) * max_typedefs);
+        if (!typedef_table) {
+            fprintf(stderr, "codegen error: out of memory (typedef_table)\n");
+            exit(1);
+        }
+    }
     strncpy(typedef_table[typedef_count].alias,    alias,    63);
     strncpy(typedef_table[typedef_count].original, original, 63);
     typedef_count++;
@@ -93,10 +106,13 @@ static const char *typedef_resolve(const char *name) {
 }
 
 static void type_push(const char *name, LLVMTypeRef type) {
-  if (type_count >= MAX_TYPES) {
-    fprintf(stderr, "codegen error: type table overflow\n");
-    exit(1);
-    return;
+  if (type_count >= max_types) {
+    max_types *= 2;
+    type_table = realloc(type_table, sizeof(TypeEntry) * max_types);
+    if (!type_table) {
+        fprintf(stderr, "codegen error: out of memory (type_table)\n");
+        exit(1);
+    }
   }
   strncpy(type_table[type_count].name, name, 63);
   type_table[type_count].type = type;
@@ -215,10 +231,15 @@ static int external_sym_count = 0;
 
 static void sym_push(const char *name, LLVMValueRef val, LLVMTypeRef type,
                      int is_func) {
-  if (*sym_count >= MAX_SYMS) {
-    fprintf(stderr, "codegen error: symbol table overflow\n");
-    exit(1);
-    return;
+  if (*sym_count >= max_syms) {
+    int old_max = max_syms;
+    max_syms *= 2;
+    sym_table = realloc(sym_table, sizeof(Symbol) * max_syms);
+    if (!sym_table) {
+      fprintf(stderr, "codegen error: out of memory (sym_table)\n");
+      exit(1);
+    }
+    memset(sym_table + old_max, 0, sizeof(Symbol) * old_max);
   }
   strncpy(sym_table[*sym_count].name, name, 63);
   sym_table[*sym_count].value = val;
@@ -232,11 +253,6 @@ static Symbol *sym_lookup(const char *name) {
     if (strcmp(sym_table[j].name, name) == 0)
       return &sym_table[j];
 
-  if (external_sym_table) {
-    for (int j = external_sym_count - 1; j >= 0; j--)
-      if (strcmp(external_sym_table[j].name, name) == 0)
-        return &external_sym_table[j];
-  }
   return NULL;
 }
 
@@ -1607,13 +1623,17 @@ static LLVMValueRef codegen_struct_def(Node *n) {
 
   StructInfo *si = find_struct_info_by_name(n->str);
   if (!si) {
-    if (struct_info_count < MAX_TYPES)
-      si = &struct_info[struct_info_count++];
-    else {
-      fprintf(stderr, "codegen error: struct info table overflow\n");
-      exit(1);
-      return NULL;
+    if (struct_info_count >= max_struct_infos) {
+      int old_max = max_struct_infos;
+      max_struct_infos *= 2;
+      struct_info = realloc(struct_info, sizeof(StructInfo) * max_struct_infos);
+      if (!struct_info) {
+        fprintf(stderr, "codegen error: out of memory (struct_info)\n");
+        exit(1);
+      }
+      memset(struct_info + old_max, 0, sizeof(StructInfo) * old_max);
     }
+    si = &struct_info[struct_info_count++];
   }
   strncpy(si->name, n->str, 63);
   strncpy(si->parent_name, parent_name, 63);
@@ -3124,23 +3144,70 @@ static void init_all_targets(void) {
 void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
              const char *extra_link_flags, const char *target_triple, const char *passes, char flags) {
   g_is_import = flags & 0b0001;
-  type_count = 0;
-  struct_info_count = 0;
-  typedef_count = 0;
-  sym_table = malloc(sizeof(Symbol) * MAX_SYMS);
+  
+  max_syms = MAX_SYMS;
+  sym_table = malloc(sizeof(Symbol) * max_syms);
   sym_count = malloc(sizeof(int)); *sym_count = 0;
-  memset(type_table, 0, sizeof(type_table));
-  memset(struct_info, 0, sizeof(struct_info));
-  memset(sym_table, 0, sizeof(Symbol) * MAX_SYMS);
+  memset(sym_table, 0, sizeof(Symbol) * max_syms);
 
   if (sym && sym_c) {
     external_sym_table = (Symbol*)sym;
     external_sym_count = *sym_c;
   }
 
-  ctx = LLVMContextCreate();
-  mod = LLVMModuleCreateWithNameInContext("flame", ctx);
+  // Создаем глобальный контекст и таблицы типов ТОЛЬКО ОДИН РАЗ
+  if (!ctx) {
+      ctx = LLVMContextCreate();
+      
+      type_count = 0;
+      max_types = MAX_TYPES;
+      type_table = calloc(max_types, sizeof(TypeEntry));
+
+      struct_info_count = 0;
+      max_struct_infos = MAX_TYPES;
+      struct_info = calloc(max_struct_infos, sizeof(StructInfo));
+
+      typedef_count = 0;
+      max_typedefs = MAX_TYPEDEFS;
+      typedef_table = calloc(max_typedefs, sizeof(TypedefEntry));
+  }
+
+  // Имя модуля берем из out_file, чтобы они не конфликтовали
+  mod = LLVMModuleCreateWithNameInContext(out_file, ctx);
   builder = LLVMCreateBuilderInContext(ctx);
+
+  if (sym && sym_c) {
+      Symbol *ext_table = (Symbol *)sym;
+      int ext_count = *(int *)sym_c;
+      
+      for (int i = 0; i < ext_count; i++) {
+          Symbol *es = &ext_table[i];
+          
+          if (es->is_func) {
+              // Создаем заглушку внешней функции
+              LLVMValueRef f = LLVMGetNamedFunction(mod, es->name);
+              if (!f) {
+                  f = LLVMAddFunction(mod, es->name, es->type);
+                  LLVMSetLinkage(f, LLVMExternalLinkage);
+              }
+              // Добавляем в текущую таблицу
+              sym_push(es->name, f, es->type, 1);
+              sym_table[*sym_count - 1].fn_type = es->fn_type;
+              sym_table[*sym_count - 1].elem_type = es->elem_type;
+          } else {
+              // Создаем заглушку глобальной переменной
+              LLVMValueRef g = LLVMGetNamedGlobal(mod, es->name);
+              if (!g) {
+                  g = LLVMAddGlobal(mod, es->type, es->name);
+                  LLVMSetLinkage(g, LLVMExternalLinkage);
+              }
+              // Добавляем в текущую таблицу
+              sym_push(es->name, g, es->type, 0);
+              sym_table[*sym_count - 1].elem_type = es->elem_type;
+              sym_table[*sym_count - 1].fn_type = es->fn_type;
+          }
+      }
+  }
 
   init_all_targets();
 
@@ -3194,7 +3261,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
     }
   }
 
-  {
+  if (!g_T_struct_type) {
     LLVMTypeRef ptr = LLVMPointerTypeInContext(ctx, 0);
     LLVMTypeRef i64 = LLVMInt64TypeInContext(ctx);
     LLVMTypeRef fields[] = {i64, i64, ptr, ptr, ptr};
@@ -3218,7 +3285,6 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
                                 LLVMConstNull(ptr)};
         LLVMSetInitializer(gvar, LLVMConstNamedStruct(g_T_struct_type, elems, 5));
         LLVMSetGlobalConstant(gvar, 1);
-        
         LLVMSetLinkage(gvar, LLVMLinkOnceAnyLinkage);
       }
     }
@@ -3369,7 +3435,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
   LLVMDisposeTargetMachine(machine);
   LLVMDisposeBuilder(builder);
   LLVMDisposeModule(mod);
-  LLVMContextDispose(ctx);
+  //LLVMContextDispose(ctx);
 
   if (g_is_import) {
     void **ret = malloc(sizeof(void*) * 2);

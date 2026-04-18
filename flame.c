@@ -13,6 +13,7 @@
 #include <libgen.h>
 
 #define MAX_IMPORTED_MODULES 64
+#define version "1.3"
 
 OverloadEntry* global_modules_overloads[MAX_IMPORTED_MODULES];
 int global_modules_counts[MAX_IMPORTED_MODULES];
@@ -31,7 +32,6 @@ OverloadEntry* get_global_modules(int *out_num_modules, int **out_counts) {
     return (OverloadEntry*)global_modules_overloads; 
 }
 
-const char* version = "1.2";
 char pass_list[2048] = "";
 char g_flags = 0;
 void *g_sym = NULL;
@@ -109,8 +109,8 @@ int compile_file(const char *input_file, const char *link_flags,
     pregen(nodes);
     void **tmp = codegen(nodes, input_file, sym_buffer, sym_c, link_flags, target, pass_list, flags);
     if (tmp != NULL && tmp != (void**)-1) { 
-        sym_buffer = tmp[0];
-        sym_c = tmp[1];
+        g_sym = tmp[0];
+        g_sym_c = tmp[1];
     } else {
         return 1; 
     }
