@@ -11,6 +11,9 @@ typedef struct {
     char base_name[64];
     char mangled[128];
     char param_types[MAX_OVERLOAD_PARAMS][64];
+    /* per-parameter lifetime: 'a' = valid after call, 'b' = may be invalid,
+       'c' = unknown (pregen resolves), '\0' = not a pointer param */
+    char param_lifetimes[MAX_OVERLOAD_PARAMS];
     int  param_count;
     char ret_type[64];
     int  is_static;

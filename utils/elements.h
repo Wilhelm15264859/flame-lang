@@ -4,6 +4,22 @@
 typedef struct vector_node vector_node;
 
 typedef enum {
+    TYPE_BASE,      // int, char, struct Foo
+    TYPE_PTR,       // *
+    TYPE_ARRAY,     // [N]
+    TYPE_FUNC       // (int, float)
+} TypeKind;
+
+typedef struct TypeInfo {
+    TypeKind kind;
+    char base_name[64];
+    struct TypeInfo *inner;
+    int array_size;
+    struct TypeInfo **params;
+    int param_count;
+} TypeInfo;
+
+typedef enum {
     NODE_TYPE,
     NODE_IDENT,
     NODE_FLOAT,
@@ -56,12 +72,22 @@ typedef enum {
     NODE_ENUM,
     NODE_TYPE_LITERAL,
     NODE_TYPEDEF,
+    NODE_EXTERN_VAR_DEF,
+    NODE_EXTERN_STRUCT_DEF,
+    NODE_CAST,
+    /* ── Coroutine nodes ── */
+    NODE_ASYNC_FUNC_DEF,      /* async void foo(...)  — fire-and-forget by default */
+    NODE_AWAIT_FUNC_DEF,      /* await void foo(...)  — blocking by default        */
+    NODE_CHANNEL_VAR_DEF,     /* channel int x = 0;   — writable by coroutines     */
+    NODE_ASYNC_CALL,          /* async foo(...)  — fire-and-forget call             */
+    NODE_AWAIT_CALL           /* await foo(...)  — blocking call                   */
 } NodeType;
 
 typedef struct Node {
     NodeType type;
     vector_node *childs;
     char *str;
+    TypeInfo *result_type;
 } Node;
 
 typedef enum {

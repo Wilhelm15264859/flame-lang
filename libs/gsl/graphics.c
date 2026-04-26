@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define MAX_GEOM_VERTS 65536
+
 void err() {
     __asm__ __volatile__ (
         "syscall"
@@ -17,8 +19,15 @@ void err() {
 }
 
 /* ================================================================== */
-/* Global Vulkan state                                                  */
+/* Global Vulkan state                                                */
 /* ================================================================== */
+
+static uint8_t geom_verts[MAX_GEOM_VERTS * 12]; // 12 байт на одну вершину
+static uint32_t geom_vert_count = 0;
+
+static VkBuffer       geom_vbuf        = VK_NULL_HANDLE;
+static VkDeviceMemory geom_vbuf_memory = VK_NULL_HANDLE;
+static uint32_t       geom_vbuf_size   = 0;
 
 float clearR = 0.1f, clearG = 0.1f, clearB = 0.1f, clearA = 1.0f;
 int width;
@@ -53,6 +62,16 @@ uint32_t vertexCount = 0;
 /* ================================================================== */
 /* Shared helpers                                                       */
 /* ================================================================== */
+
+// Глобальный якорь экрана (по умолчанию 0.5, 0.5 - центр)
+static float g_originAnchorX = 0.5f;
+static float g_originAnchorY = 0.5f;
+
+// Функция для установки системы координат
+void setGlobalOrigin(float anchorX, float anchorY) {
+    g_originAnchorX = anchorX;
+    g_originAnchorY = anchorY;
+}
 
 void setClearColor(int r, int g, int b, int a) {
     clearR = r / 255.0f;
@@ -812,13 +831,14 @@ void graphicInit(SDL_Window* win) {
     vkGetPhysicalDeviceSurfacePresentModesKHR(phDevice, surf, &presentModeCount, NULL);
     VkPresentModeKHR *presentModes = malloc(sizeof(VkPresentModeKHR) * presentModeCount);
     vkGetPhysicalDeviceSurfacePresentModesKHR(phDevice, surf, &presentModeCount, presentModes);
+    
     VkPresentModeKHR chosenPresentMode = VK_PRESENT_MODE_FIFO_KHR;
-    for (uint32_t i = 0; i < presentModeCount; i++) {
+    /*for (uint32_t i = 0; i < presentModeCount; i++) {
         if (presentModes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
             chosenPresentMode = VK_PRESENT_MODE_MAILBOX_KHR;
             break;
         }
-    }
+    }*/
     free(presentModes);
     fprintf(stderr, "Present mode: %d\n", chosenPresentMode);
 
@@ -951,8 +971,10 @@ void graphicInit(SDL_Window* win) {
         "layout(location = 1) in vec4 inColor;\n"
         "layout(location = 0) out vec4 fragColor;\n"
         "void main() {\n"
-        "    float nx = float(inPos.x) / %f - 1.0;\n"
-        "    float ny = float(inPos.y) / %f - 1.0;\n"
+        "    // Делим на половину ширины/высоты. Теперь 0,0 - центр.\n"
+        "    float nx = float(inPos.x) / %f;\n"
+        "    // Минус переворачивает ось Y, чтобы она смотрела ВВЕРХ\n"
+        "    float ny = -float(inPos.y) / %f;\n"
         "    gl_Position = vec4(nx, ny, 0.0, 1.0);\n"
         "    fragColor = inColor;\n"
         "}\n",
@@ -1058,6 +1080,51 @@ void graphicInit(SDL_Window* win) {
 /* drawFrame — geometry + text in one render pass                      */
 /* ================================================================== */
 
+static void flush_geometry(VkCommandBuffer cmd) {
+    if (geom_vert_count == 0) return;
+
+    uint32_t needed = geom_vert_count * 12;
+
+    if (needed > geom_vbuf_size) {
+        if (geom_vbuf != VK_NULL_HANDLE) vkDestroyBuffer(device, geom_vbuf, NULL);
+        if (geom_vbuf_memory != VK_NULL_HANDLE) vkFreeMemory(device, geom_vbuf_memory, NULL);
+
+        VkBufferCreateInfo bi = {
+            .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size        = needed,
+            .usage       = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+        vkCreateBuffer(device, &bi, NULL, &geom_vbuf);
+
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(device, geom_vbuf, &mr);
+
+        VkMemoryAllocateInfo ai = {
+            .sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize  = mr.size,
+            .memoryTypeIndex = findMemoryType(phDevice, mr.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT),
+        };
+        vkAllocateMemory(device, &ai, NULL, &geom_vbuf_memory);
+        vkBindBufferMemory(device, geom_vbuf, geom_vbuf_memory, 0);
+        geom_vbuf_size = needed;
+    }
+
+    void *mapped;
+    vkMapMemory(device, geom_vbuf_memory, 0, needed, 0, &mapped);
+    memcpy(mapped, geom_verts, needed);
+    vkUnmapMemory(device, geom_vbuf_memory);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &geom_vbuf, &offset);
+    vkCmdDraw(cmd, geom_vert_count, 1, 0, 0);
+
+    geom_vert_count = 0;
+}
+
 void drawFrame() {
     fprintf(stderr, "drawFrame called: vertexCount=%u\n", vertexCount);
     uint32_t imageIndex;
@@ -1098,14 +1165,7 @@ void drawFrame() {
     vkCmdBeginRenderPass(commandBuffers[imageIndex], &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
     /* --- Geometry draw --- */
-    if (vertexCount > 0) {
-        vkCmdBindPipeline(commandBuffers[imageIndex],
-            VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-        VkBuffer vbufs[]    = {vertexBuffer};
-        VkDeviceSize offs[] = {0};
-        vkCmdBindVertexBuffers(commandBuffers[imageIndex], 0, 1, vbufs, offs);
-        vkCmdDraw(commandBuffers[imageIndex], vertexCount, 1, 0, 0);
-    }
+    flush_geometry(commandBuffers[imageIndex]);
 
     /* --- Text draw (same render pass, on top of geometry) --- */
     flush_text(commandBuffers[imageIndex]);
@@ -1222,8 +1282,11 @@ void closeWindow(SDL_Window *win) {
 
 int appEvent() {
     SDL_Event event;
-    while (SDL_WaitEvent(&event))
-        if (event.type == SDL_EVENT_QUIT) return 1;
+    while (SDL_PollEvent(&event)) {
+        if (event.type == SDL_EVENT_QUIT) {
+            return 1;
+        }
+    }
     return 0;
 }
 
@@ -1286,7 +1349,8 @@ static int formVertexCounts[] = {6, CIRCLE_SEGMENTS*3, 3, 27, 6, 15};
 
 int getFormVertexCount(int form) { return formVertexCounts[form]; }
 
-void buildFormVertices(int form, int x, int y, int w, int h,
+void buildFormVertices(int form, float x, float y, float w, float h,
+                       float anchorX, float anchorY, // <-- Вот они, индивидуальные якоря!
                        int r, int g, int b, int a, void *out)
 {
     buildCircleTemplate();
@@ -1305,12 +1369,27 @@ void buildFormVertices(int form, int x, int y, int w, int h,
     }
 
     unsigned char *ptr = (unsigned char *)out;
-    float cx = x + w * 0.5f, cy = y + h * 0.5f;
-    float rx = w * 0.5f,     ry = h * 0.5f;
+    
+    // --- ИНДИВИДУАЛЬНЫЙ ЯКОРЬ ФИГУРЫ ---
+    // x, y - это точка на экране, куда мы хотим "приколоть" фигуру.
+    // anchorX, anchorY - это место на самой фигуре, за которое мы ее держим.
+    
+    float left = x - (w * anchorX);
+    float top  = y - (h * anchorY); 
+
+    // -----------------------------------
+
+    // Истинный центр фигуры (нужен для правильного масштабирования шаблонов)
+    float cx = left + (w * 0.5f);
+    float cy = top  + (h * 0.5f);
+    
+    float rx = w * 0.5f;
+    float ry = h * 0.5f;
 
     for (int i = 0; i < count; i++) {
         int vx = (int)(cx + tmpl[i][0] * rx);
         int vy = (int)(cy + tmpl[i][1] * ry);
+        
         memcpy(ptr + i*12 + 0, &vx, 4);
         memcpy(ptr + i*12 + 4, &vy, 4);
         ptr[i*12+8]  = (unsigned char)r;
@@ -1318,4 +1397,49 @@ void buildFormVertices(int form, int x, int y, int w, int h,
         ptr[i*12+10] = (unsigned char)b;
         ptr[i*12+11] = (unsigned char)a;
     }
+}
+
+void queueForm(int form, float x, float y, float w, float h, 
+               float anchorX, float anchorY, 
+               int r, int g, int b, int a) {
+                   
+    int count = getFormVertexCount(form);
+    
+    if (geom_vert_count + count > MAX_GEOM_VERTS) {
+        fprintf(stderr, "Внимание: превышен лимит вершин геометрии!\n");
+        return; 
+    }
+
+    buildFormVertices(form, x, y, w, h, anchorX, anchorY, r, g, b, a, &geom_verts[geom_vert_count * 12]);
+    
+    geom_vert_count += count;
+}
+
+int main() {
+    SDL_Window* win = openWindow("Моя игра", 800, 600);
+    setClearColor(40, 40, 40, 255);
+
+    int quit = 0;
+    while (!quit) {
+        quit = appEvent();
+
+        // Точка на экране (0, 0) — это ровно центр твоего окна 800x600
+
+        // Красный квадрат: прицепится к центру левым верхним углом 
+        // (нарисуется в правой верхней четверти экрана)
+        queueForm(0, 0, 0, 100, 100, 0.0f, 0.0f, 255, 0, 0, 255);
+
+        // Синий квадрат: прицепится к центру правым нижним углом 
+        // (нарисуется в левой нижней четверти экрана)
+        queueForm(0, 0, 0, 100, 100, 1.0f, 1.0f, 0, 0, 255, 255);
+
+        // Зеленый квадрат: встанет ровно по центру экрана
+        queueForm(0, 0, 0, 100, 100, 0.5f, 0.5f, 0, 255, 0, 255);
+            
+        // Рисуем всё разом
+        drawFrame();
+    }
+
+    closeWindow(win);
+    return 0;
 }

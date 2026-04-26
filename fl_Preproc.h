@@ -1,4 +1,5 @@
 #pragma once
+#define VERSION "1.4"
 
 char       *preprocess(const char *source, const char *base_dir);
 const char **preprocess_get_imports(int *count);

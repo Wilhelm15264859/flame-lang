@@ -1,22 +1,27 @@
 #include "fl_Pregen.h"
+#include "fl_Parser.h"   /* OverloadEntry (with param_lifetimes), global_modules_* */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>   /* uint64_t — нужен для CFG-битсетов */
+
+extern OverloadEntry* global_modules_overloads[];
+extern int global_modules_counts[];
+extern int num_imported_modules;
 
 /* ═══════════════════════════════════════════════════════════════════
  * Константы
  * ═══════════════════════════════════════════════════════════════════ */
 #define MAX_AUTODEL         64
 #define MAX_OWNERSHIP_FUNCS 64
-#define MAX_VADDR_VARS      64 //
-#define MAX_VADDR_NAMES     64 //
+#define MAX_VADDR_VARS      64 
+#define MAX_VADDR_NAMES     64 
 #define MAX_FIELD_ALIASES   46
 #define MAX_INDEX_ALIASES   64
-#define MAX_VADDR_POOL      64 //
+#define MAX_VADDR_POOL      64 
 #define MAX_GLOBAL_SLOTS    64
 #define MAX_FUNC_PARAMS     32
-#define MAX_FUNC_INDEX      64 //
+#define MAX_FUNC_INDEX      64 
 #define MAX_PARAM_ALIASES   16
 #define MAX_PARAM_FIELDS    16
 
@@ -60,22 +65,19 @@ static void vaddr_push_free(int addr) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * Индекс функций — таблица всех известных функций и их параметров
+ * Индекс функций
  * ═══════════════════════════════════════════════════════════════════ */
-
-/* Запись об одном параметре функции: имя + является ли указателем */
 typedef struct {
     char name[64];
-    int  is_ptr;   /* 1 если тип заканчивается на '*' */
+    int  is_ptr;
 } FuncParam;
 
-/* Запись об одной функции */
 typedef struct {
     char       name[64];
-    int        index;            /* порядковый индекс функции в таблице */
+    int        index;
     FuncParam  params[MAX_FUNC_PARAMS];
     int        param_count;
-    int        returns_ptr;      /* 1 если ownership-функция */
+    int        returns_ptr;
 } FuncRecord;
 
 static FuncRecord g_func_index[MAX_FUNC_INDEX];
@@ -85,13 +87,12 @@ static void func_index_reset(void) {
     g_func_index_count = 0;
 }
 
-/* Регистрирует функцию (идемпотентно) и возвращает указатель на запись */
 static FuncRecord *func_index_get_or_add(const char *name) {
     for (int i = 0; i < g_func_index_count; i++)
         if (strcmp(g_func_index[i].name, name) == 0)
             return &g_func_index[i];
     if (g_func_index_count >= MAX_FUNC_INDEX) {
-        fprintf(stderr, "Error: buffer overflow -> out of memory");
+        fprintf(stderr, "Error: buffer overflow -> out of memory\n");
         exit(1);
     };
     FuncRecord *r = &g_func_index[g_func_index_count];
@@ -111,31 +112,26 @@ static FuncRecord *func_index_find(const char *name) {
     return NULL;
 }
 
-/* Заполняет индекс параметров из AST-узла NODE_PARAMS */
 static void func_index_register_params(FuncRecord *r, Node *params_node) {
     if (!params_node || params_node->type != NODE_PARAMS) return;
     r->param_count = 0;
     for (unsigned long long i = 0; i < params_node->childs->size && r->param_count < MAX_FUNC_PARAMS; i++) {
         Node *p = &params_node->childs->data[i];
-        /* Ожидаем NODE_VAR_DEF с childs[0]=type, childs[1]=name */
         if (p->type != NODE_VAR_DEF || !p->childs || p->childs->size < 2) continue;
         const char *type_str = p->childs->data[0].str ? p->childs->data[0].str : "";
         const char *nm       = p->childs->data[1].str ? p->childs->data[1].str : "";
         FuncParam *fp = &r->params[r->param_count++];
         strncpy(fp->name, nm, 63);     fp->name[63] = '\0';
-        /* Указатель: тип заканчивается на '*' или содержит '*' */
         int tlen = (int)strlen(type_str);
         fp->is_ptr = (tlen > 0 && type_str[tlen - 1] == '*') ? 1 : 0;
     }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * Глобальный граф алиасов (межпроцедурный анализ)
+ * Глобальный граф алиасов
  * ═══════════════════════════════════════════════════════════════════ */
-
-/* Эффект, который функция производит над одним параметром-указателем */
 typedef struct {
-    char alias[64];      /* имя нового алиаса внутри тела функции */
+    char alias[64];
 } ParamAliasEffect;
 
 typedef struct {
@@ -149,7 +145,7 @@ typedef struct {
     int  param_idx;
     int  vaddr;
     int  escapes_out;
-    /* Эффекты, которые были собраны при анализе тела функции */
+    char resolved_lifetime;
     ParamAliasEffect alias_effects[MAX_PARAM_ALIASES];
     int              alias_effect_count;
     ParamFieldEffect field_effects[MAX_PARAM_FIELDS];
@@ -172,9 +168,10 @@ static GlobalArgAlias *gaa_get_or_push(const char *fn, int pidx, int vaddr) {
     if (g_arg_alias_count >= MAX_GLOBAL_SLOTS) return NULL;
     GlobalArgAlias *e = &g_arg_aliases[g_arg_alias_count++];
     strncpy(e->func_name, fn, 63); e->func_name[63] = '\0';
-    e->param_idx         = pidx;
-    e->vaddr             = vaddr;
-    e->escapes_out       = 0;
+    e->param_idx          = pidx;
+    e->vaddr              = vaddr;
+    e->escapes_out        = 0;
+    e->resolved_lifetime  = '\0';
     e->alias_effect_count = 0;
     e->field_effect_count = 0;
     return e;
@@ -191,7 +188,6 @@ static void gaa_mark_escape(const char *fn, int vaddr) {
             g_arg_aliases[i].escapes_out = 1;
 }
 
-/* Записывает, что параметр param_idx функции fn получил новый алиас alias_name */
 static void gaa_add_alias_effect(const char *fn, int pidx, int vaddr, const char *alias_name) {
     GlobalArgAlias *e = gaa_get_or_push(fn, pidx, vaddr);
     if (!e) return;
@@ -201,7 +197,6 @@ static void gaa_add_alias_effect(const char *fn, int pidx, int vaddr, const char
     strncpy(e->alias_effects[e->alias_effect_count++].alias, alias_name, 63);
 }
 
-/* Записывает, что параметр получил новый field-alias */
 static void gaa_add_field_effect(const char *fn, int pidx, int vaddr,
                                   const char *obj, const char *field, int is_arrow) {
     GlobalArgAlias *e = gaa_get_or_push(fn, pidx, vaddr);
@@ -268,32 +263,6 @@ static Node make_delete_node(const char *name) {
     return del;
 }
 
-static Node make_tempvar_node(const char *tmp_name, const char *type_str,
-                              Node *expr) {
-    Node var;
-    var.childs = malloc(sizeof(vector_node));
-    vn_init(var.childs, 3);
-    var.str  = NULL;
-    var.type = NODE_VAR_DEF;
-    Node *type  = make_node(NODE_TYPE,  type_str);
-    vn_push_back(var.childs, *type);  free(type);
-    Node *ident = make_node(NODE_IDENT, tmp_name);
-    vn_push_back(var.childs, *ident); free(ident);
-    vn_push_back(var.childs, *expr);
-    return var;
-}
-
-static Node make_return_var_node(const char *tmp_name) {
-    Node ret;
-    ret.childs = malloc(sizeof(vector_node));
-    vn_init(ret.childs, 1);
-    ret.str  = NULL;
-    ret.type = NODE_RETURN;
-    Node *var = make_node(NODE_VAR, tmp_name);
-    vn_push_back(ret.childs, *var); free(var);
-    return ret;
-}
-
 /* ═══════════════════════════════════════════════════════════════════
  * Inline-new
  * ═══════════════════════════════════════════════════════════════════ */
@@ -314,11 +283,19 @@ static void replace_inline_new(Node *n, char tmp_names[64][64],
         if (child->type == NODE_NEW) {
             char tmp_name[64];
             snprintf(tmp_name, sizeof(tmp_name), "__inew_%d", autodel_counter++);
+            
             Node *new_copy = malloc(sizeof(Node));
             *new_copy = *child;
+            /* FIX 1: Глубокое копирование строки во избежание UB */
+            if (child->str) {
+                new_copy->str = malloc(strlen(child->str) + 1);
+                strcpy(new_copy->str, child->str);
+            }
+
             new_nodes[*count] = new_copy;
             strncpy(tmp_names[*count], tmp_name, 63);
             (*count)++;
+            
             free(child->str);
             child->str    = malloc(strlen(tmp_name) + 1);
             strcpy(child->str, tmp_name);
@@ -339,7 +316,8 @@ static void pregen_inline_new(vector_node *nodes, int start, int end) {
             pregen_inline_new(n->childs, 0, (int)n->childs->size);
             continue;
         }
-        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF) &&
+        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+             n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) &&
             n->childs->size >= 4) {
             Node *scope = &n->childs->data[3];
             if (scope->type == NODE_SCOPE)
@@ -389,7 +367,7 @@ static void ownership_func_push(const char *name) {
         max_ownership_funcs *= 2;
         char (*re_ownership_funcs)[64] = realloc(ownership_funcs, max_ownership_funcs * 64);
         if (!re_ownership_funcs) {
-            fprintf(stderr, "Error: buffer overflow -> out of memory");
+            fprintf(stderr, "Error: buffer overflow -> out of memory\n");
             exit(1);
         }
         ownership_funcs = re_ownership_funcs;
@@ -414,7 +392,7 @@ static char_arr_ptr_8 collect_autodel_names_in_scope(vector_node *nodes, char (*
                 max_auotdel *= 2;
                 char (*re_out)[64] = realloc(out, max_auotdel * 64);
                 if (!re_out) {
-                    fprintf(stderr, "Error: buffer overflow -> out of memory");
+                    fprintf(stderr, "Error: buffer overflow -> out of memory\n");
                     exit(1);
                 }
                 out = re_out;
@@ -432,7 +410,6 @@ static char_arr_ptr_8 collect_autodel_names_in_scope(vector_node *nodes, char (*
                     collect_autodel_names_in_scope(child->childs, out, count);
             }
     }
-
     return out;
 }
 
@@ -467,14 +444,19 @@ static void collect_ownership_func(Node *func_node) {
     char (*autodel_names)[64] = malloc(max_auotdel * 64);
     size_t  autodel_count = 0;
     autodel_names = collect_autodel_names_in_scope(scope->childs, autodel_names, &autodel_count);
-    if (autodel_count == 0) return;
+    if (autodel_count == 0) {
+        free(autodel_names); /* FIX 2: Утечка памяти компилятора */
+        return;
+    }
     collect_returns_in_scope(scope->childs, autodel_names, autodel_count, fname);
+    free(autodel_names); /* FIX 2 */
 }
 
 static void collect_ownership(vector_node *nodes, int start, int end) {
     for (int j = start; j < end; j++) {
         Node *n = &nodes->data[j];
-        if (n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF)
+        if (n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+            n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF)
             collect_ownership_func(n);
         else if (n->type == NODE_SCOPE)
             collect_ownership(n->childs, 0, (int)n->childs->size);
@@ -488,7 +470,8 @@ static void patch_ownership_vardefs(vector_node *nodes, int start, int end) {
             patch_ownership_vardefs(n->childs, 0, (int)n->childs->size);
             continue;
         }
-        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF) &&
+        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+             n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) &&
             n->childs->size >= 4) {
             Node *scope = &n->childs->data[3];
             if (scope->type == NODE_SCOPE)
@@ -559,11 +542,19 @@ typedef struct {
     int  is_arrow;
 } FieldAlias;
 
-/* Алиас через индекс массива: arr[idx_var] = ptr  */
 typedef struct {
-    char arr[64];      /* имя массива                  */
-    char idx_var[64];  /* имя переменной-индекса       */
+    char arr[64];
+    char idx_var[64];
 } IndexAlias;
+
+#define MAX_MIRROR_ALIASES 32
+typedef struct {
+    char alias_var[64];
+    char owner_obj[64];
+    char owner_field[64];
+    int  is_arrow;
+    int  is_addr_of; 
+} MirrorAlias;
 
 typedef struct {
     int        vaddr;
@@ -573,14 +564,12 @@ typedef struct {
     int        field_count;
     IndexAlias idx_aliases[MAX_INDEX_ALIASES];
     int        idx_alias_count;
+    MirrorAlias mirrors[MAX_MIRROR_ALIASES];
+    int         mirror_count;
     char       base_type[64];
-    int        escaped;    /* 1 = убежал через return или массив */
-    
+    int        escaped;    
     vector_node *birth_vec;
     int          birth_idx;
-    
-    vector_node *limit_vec;
-    int          limit_idx;
 } VAddrSlot;
 
 /* ─── Операции над слотом ─────────────────────────────────────────── */
@@ -591,19 +580,8 @@ static void slot_add_name(VAddrSlot *s, const char *name) {
     if (s->name_count < MAX_VADDR_NAMES)
         strncpy(s->names[s->name_count++], name, 63);
     else {
-        fprintf(stderr, "Error: buffer overflow -> out of memory");
+        fprintf(stderr, "Error: buffer overflow -> out of memory\n");
         exit(1);
-    }
-}
-
-static void slot_remove_name(VAddrSlot *s, const char *name) {
-    for (int k = 0; k < s->name_count; k++) {
-        if (strcmp(s->names[k], name) == 0) {
-            for (int m = k; m < s->name_count - 1; m++)
-                strncpy(s->names[m], s->names[m + 1], 63);
-            s->name_count--;
-            return;
-        }
     }
 }
 
@@ -632,13 +610,28 @@ static void slot_add_idx_alias(VAddrSlot *s, const char *arr, const char *idx_va
 }
 
 static void slot_remove_idx_aliases_for_idx(VAddrSlot *s, const char *idx_var) {
-    /* Удаляем все IndexAlias у которых переменная-индекс совпадает с idx_var */
     int w = 0;
     for (int k = 0; k < s->idx_alias_count; k++) {
         if (strcmp(s->idx_aliases[k].idx_var, idx_var) != 0)
             s->idx_aliases[w++] = s->idx_aliases[k];
     }
     s->idx_alias_count = w;
+}
+
+static void slot_add_mirror(VAddrSlot *s, const char *alias_var,
+                             const char *owner_obj, const char *owner_field,
+                             int is_arrow, int is_addr_of) {
+    for (int k = 0; k < s->mirror_count; k++)
+        if (strcmp(s->mirrors[k].alias_var, alias_var) == 0 &&
+            strcmp(s->mirrors[k].owner_obj, owner_obj) == 0 &&
+            strcmp(s->mirrors[k].owner_field, owner_field) == 0) return;
+    if (s->mirror_count >= MAX_MIRROR_ALIASES) return;
+    MirrorAlias *m = &s->mirrors[s->mirror_count++];
+    strncpy(m->alias_var,   alias_var,   63);
+    strncpy(m->owner_obj,   owner_obj,   63);
+    strncpy(m->owner_field, owner_field, 63);
+    m->is_arrow   = is_arrow;
+    m->is_addr_of = is_addr_of;
 }
 
 static int find_slot_by_name(VAddrSlot *slots, int count, const char *name) {
@@ -651,7 +644,6 @@ static int find_slot_by_name(VAddrSlot *slots, int count, const char *name) {
     return -1;
 }
 
-/* Версия без фильтра по escaped — нужна при сборе эффектов callee */
 static int find_slot_by_name_any(VAddrSlot *slots, int count, const char *name) {
     for (int i = 0; i < count; i++)
         for (int k = 0; k < slots[i].name_count; k++)
@@ -682,10 +674,8 @@ static int slot_used_in_node(Node *n, VAddrSlot *s) {
         }
     }
 
-    /* Проверяем idx_aliases: arr[idx_var] — использование слота */
     for (int k = 0; k < s->idx_alias_count; k++) {
         if (!n || !n->childs) continue;
-        /* Прямое использование: NODE_INDEX с arr и idx_var */
         if ((n->type == NODE_INDEX || n->type == NODE_INDEX_ASSIGN ||
              n->type == NODE_ADDR_INDEX) && n->childs->size >= 2) {
             Node *arr_n = &n->childs->data[0];
@@ -698,31 +688,113 @@ static int slot_used_in_node(Node *n, VAddrSlot *s) {
     return 0;
 }
 
+
 /* ═══════════════════════════════════════════════════════════════════
  * Рекурсивный поиск Алиасов (глубокий проход)
  * ═══════════════════════════════════════════════════════════════════ */
-static void collect_aliases_in_node(Node *n, VAddrSlot *slots, int slot_count, int *changed) {
+static void collect_aliases_in_node(Node *n, VAddrSlot *slots, int slot_count,
+                                    int *changed, const char *func_name) {
     if (!n) return;
-    
+
     if (n->type == NODE_VAR_DEF && n->childs->size >= 3) {
         Node *init = &n->childs->data[2];
-        if (init->type == NODE_VAR && init->str && init->str[0]) {
-            int si = find_slot_by_name(slots, slot_count, init->str);
-            if (si >= 0 && n->childs->data[1].str) {
-                int before = slots[si].name_count;
-                slot_add_name(&slots[si], n->childs->data[1].str);
-                if (slots[si].name_count != before) *changed = 1;
+        const char *lhs_name = n->childs->data[1].str;
+
+        if ((init->type == NODE_MEMBER_ARROW || init->type == NODE_MEMBER_DOT) &&
+            init->childs && init->childs->size >= 1 &&
+            init->str && init->str[0] &&
+            init->childs->data[0].str && init->childs->data[0].str[0] &&
+            lhs_name && lhs_name[0]) {
+            const char *owner_obj   = init->childs->data[0].str;
+            const char *owner_field = init->str;
+            int is_arrow = (init->type == NODE_MEMBER_ARROW);
+            for (int si = 0; si < slot_count; si++) {
+                int has_owner = 0;
+                for (int k = 0; k < slots[si].name_count; k++)
+                    if (strcmp(slots[si].names[k], owner_obj) == 0) { has_owner = 1; break; }
+                if (!has_owner)
+                    for (int k = 0; k < slots[si].field_count; k++)
+                        if (strcmp(slots[si].fields[k].obj, owner_obj) == 0) { has_owner = 1; break; }
+                if (has_owner) {
+                    int before = slots[si].mirror_count;
+                    slot_add_mirror(&slots[si], lhs_name, owner_obj, owner_field,
+                                    is_arrow, 0);
+                    if (slots[si].mirror_count != before) *changed = 1;
+                }
+            }
+        }
+        else if (init->type == NODE_ADDR && init->childs && init->childs->size >= 1) {
+            Node *inner = &init->childs->data[0];
+            if ((inner->type == NODE_MEMBER_ARROW || inner->type == NODE_MEMBER_DOT) &&
+                inner->childs && inner->childs->size >= 1 &&
+                inner->str && inner->str[0] &&
+                inner->childs->data[0].str && inner->childs->data[0].str[0] &&
+                lhs_name && lhs_name[0]) {
+                const char *owner_obj   = inner->childs->data[0].str;
+                const char *owner_field = inner->str;
+                int is_arrow = (inner->type == NODE_MEMBER_ARROW);
+                for (int si = 0; si < slot_count; si++) {
+                    int has_owner = 0;
+                    for (int k = 0; k < slots[si].name_count; k++)
+                        if (strcmp(slots[si].names[k], owner_obj) == 0) { has_owner = 1; break; }
+                    if (has_owner) {
+                        int before = slots[si].mirror_count;
+                        slot_add_mirror(&slots[si], lhs_name, owner_obj, owner_field,
+                                        is_arrow, 1);
+                        if (slots[si].mirror_count != before) *changed = 1;
+                    }
+                }
             }
         }
     }
     else if (n->type == NODE_ASSIGN && n->childs->size >= 3) {
         Node *rhs = &n->childs->data[2];
-        if (rhs->type == NODE_VAR && rhs->str && rhs->str[0]) {
-            int si = find_slot_by_name(slots, slot_count, rhs->str);
-            if (si >= 0 && n->childs->data[0].str) {
-                int before = slots[si].name_count;
-                slot_add_name(&slots[si], n->childs->data[0].str);
-                if (slots[si].name_count != before) *changed = 1;
+        const char *lhs_name = n->childs->data[0].str;
+
+        if ((rhs->type == NODE_MEMBER_ARROW || rhs->type == NODE_MEMBER_DOT) &&
+            rhs->childs && rhs->childs->size >= 1 &&
+            rhs->str && rhs->str[0] &&
+            rhs->childs->data[0].str && rhs->childs->data[0].str[0] &&
+            lhs_name && lhs_name[0]) {
+            const char *owner_obj   = rhs->childs->data[0].str;
+            const char *owner_field = rhs->str;
+            int is_arrow = (rhs->type == NODE_MEMBER_ARROW);
+            for (int si = 0; si < slot_count; si++) {
+                int has_owner = 0;
+                for (int k = 0; k < slots[si].name_count; k++)
+                    if (strcmp(slots[si].names[k], owner_obj) == 0) { has_owner = 1; break; }
+                if (!has_owner)
+                    for (int k = 0; k < slots[si].field_count; k++)
+                        if (strcmp(slots[si].fields[k].obj, owner_obj) == 0) { has_owner = 1; break; }
+                if (has_owner) {
+                    int before = slots[si].mirror_count;
+                    slot_add_mirror(&slots[si], lhs_name, owner_obj, owner_field,
+                                    is_arrow, 0);
+                    if (slots[si].mirror_count != before) *changed = 1;
+                }
+            }
+        }
+        else if (rhs->type == NODE_ADDR && rhs->childs && rhs->childs->size >= 1) {
+            Node *inner = &rhs->childs->data[0];
+            if ((inner->type == NODE_MEMBER_ARROW || inner->type == NODE_MEMBER_DOT) &&
+                inner->childs && inner->childs->size >= 1 &&
+                inner->str && inner->str[0] &&
+                inner->childs->data[0].str && inner->childs->data[0].str[0] &&
+                lhs_name && lhs_name[0]) {
+                const char *owner_obj   = inner->childs->data[0].str;
+                const char *owner_field = inner->str;
+                int is_arrow = (inner->type == NODE_MEMBER_ARROW);
+                for (int si = 0; si < slot_count; si++) {
+                    int has_owner = 0;
+                    for (int k = 0; k < slots[si].name_count; k++)
+                        if (strcmp(slots[si].names[k], owner_obj) == 0) { has_owner = 1; break; }
+                    if (has_owner) {
+                        int before = slots[si].mirror_count;
+                        slot_add_mirror(&slots[si], lhs_name, owner_obj, owner_field,
+                                        is_arrow, 1);
+                        if (slots[si].mirror_count != before) *changed = 1;
+                    }
+                }
             }
         }
     }
@@ -744,20 +816,17 @@ static void collect_aliases_in_node(Node *n, VAddrSlot *slots, int slot_count, i
         }
     }
     else if (n->type == NODE_INDEX_ASSIGN || n->type == NODE_MEMBER_INDEX_ASSIGN) {
-        /* arr[idx] = ptr  — добавляем idx_alias вместо немедленного escaped */
         if (n->childs->size >= 3) {
             Node *rhs = &n->childs->data[n->childs->size - 1];
             const char *rhs_base = get_base_var(rhs);
             if (rhs_base) {
                 int si = find_slot_by_name(slots, slot_count, rhs_base);
                 if (si >= 0 && !slots[si].escaped) {
-                    /* Определяем имя массива и переменную-индекс */
-                    Node *lhs = &n->childs->data[0]; /* NODE_INDEX или цепочка */
+                    Node *lhs = &n->childs->data[0];
                     const char *arr_name = NULL;
                     const char *idx_name = NULL;
                     if (lhs->type == NODE_INDEX && lhs->childs && lhs->childs->size >= 2) {
                         arr_name = get_base_var(&lhs->childs->data[0]);
-                        /* Индекс должен быть переменной — тогда можем отследить */
                         Node *idx_nd = &lhs->childs->data[1];
                         if (idx_nd->type == NODE_VAR || idx_nd->type == NODE_IDENT)
                             idx_name = idx_nd->str;
@@ -767,7 +836,6 @@ static void collect_aliases_in_node(Node *n, VAddrSlot *slots, int slot_count, i
                         slot_add_idx_alias(&slots[si], arr_name, idx_name);
                         if (slots[si].idx_alias_count != before) *changed = 1;
                     } else {
-                        /* Не можем отследить — помечаем как escaped */
                         if (!slots[si].escaped) {
                             slots[si].escaped = 1;
                             *changed = 1;
@@ -777,7 +845,6 @@ static void collect_aliases_in_node(Node *n, VAddrSlot *slots, int slot_count, i
             }
         }
     }
-    /* Переприсвоение переменной-индекса: idx = ... — сбрасываем idx_alias в иерархии */
     else if ((n->type == NODE_ASSIGN || n->type == NODE_VAR_DEF) && n->childs->size >= 2) {
         const char *dest = NULL;
         if (n->type == NODE_ASSIGN && n->childs->data[0].str)
@@ -785,7 +852,6 @@ static void collect_aliases_in_node(Node *n, VAddrSlot *slots, int slot_count, i
         else if (n->type == NODE_VAR_DEF && n->childs->size >= 2 && n->childs->data[1].str)
             dest = n->childs->data[1].str;
         if (dest && dest[0]) {
-            /* Проверяем, не является ли dest переменной-индексом какого-либо слота */
             for (int si = 0; si < slot_count; si++) {
                 if (slots[si].idx_alias_count == 0) continue;
                 int before = slots[si].idx_alias_count;
@@ -797,105 +863,7 @@ static void collect_aliases_in_node(Node *n, VAddrSlot *slots, int slot_count, i
     
     if (n->childs) {
         for (unsigned long long i = 0; i < n->childs->size; i++) {
-            collect_aliases_in_node(&n->childs->data[i], slots, slot_count, changed);
-        }
-    }
-}
-
-/* ═══════════════════════════════════════════════════════════════════
- * Рекурсивный поиск Split-Lifetime (a = new)
- * ═══════════════════════════════════════════════════════════════════ */
-static void split_lifetime_recursive(vector_node *vec, int start, int end, VAddrSlot *slots, int *slot_count) {
-    for (int i = start; i < end; i++) {
-        Node *n = &vec->data[i];
-        if (n->type == NODE_ASSIGN && n->childs->size >= 3) {
-            Node *rhs = &n->childs->data[2];
-            const char *dest = n->childs->data[0].str;
-            if (dest && dest[0]) {
-                int is_reinit = (rhs->type == NODE_NEW) ||
-                                (rhs->type == NODE_FUNC_CALL && rhs->str && ownership_func_lookup(rhs->str));
-                if (is_reinit) {
-                    int old_si = find_slot_by_name(slots, *slot_count, dest);
-                    if (old_si >= 0) {
-                        VAddrSlot *old_slot = &slots[old_si];
-                        slot_remove_name(old_slot, dest);
-                        if (old_slot->name_count == 0 && !old_slot->escaped) {
-                            old_slot->limit_vec = vec;
-                            old_slot->limit_idx = i;
-                        }
-                        if (*slot_count < MAX_VADDR_VARS) {
-                            VAddrSlot *ns = &slots[(*slot_count)++];
-                            ns->vaddr = vaddr_pop();
-                            ns->name_count = 0;
-                            ns->field_count = 0;
-                            ns->escaped = 0;
-                            ns->birth_vec = vec;
-                            ns->birth_idx = i;
-                            ns->limit_vec = NULL;
-                            ns->limit_idx = -1;
-                            strncpy(ns->base_type, old_slot->base_type, 63);
-                            slot_add_name(ns, dest);
-                        }
-                        else {
-                            fprintf(stderr, "Error: buffer overflow -> out of memory");
-                            exit(1);
-                        }
-                    }
-                }
-            }
-        }
-        if (n->childs) {
-            split_lifetime_recursive(n->childs, 0, n->childs->size, slots, slot_count);
-        }
-    }
-}
-
-/* ═══════════════════════════════════════════════════════════════════
- * Рекурсивная мутация Return (Escape)
- * ═══════════════════════════════════════════════════════════════════ */
-static void mutate_returns_recursive(vector_node *vec, int start, int end, VAddrSlot *slots, int slot_count, const char *func_name) {
-    for (int i = start; i < end; i++) {
-        Node *n = &vec->data[i];
-        if (n->type == NODE_RETURN && n->childs->size > 0) {
-            Node *ret_expr = &n->childs->data[0];
-            if (ret_expr->type != NODE_UNDEF) {
-                for (int si = 0; si < slot_count; si++) {
-                    if (slots[si].escaped) continue;
-                    if (!slot_used_in_node(ret_expr, &slots[si])) continue;
-
-                    if (ret_expr->type == NODE_VAR) {
-                        int direct = 0;
-                        for (int k = 0; k < slots[si].name_count && !direct; k++)
-                            if (strcmp(ret_expr->str, slots[si].names[k]) == 0) direct = 1;
-                        if (direct) {
-                            slots[si].escaped = 1;
-                            if (func_name && func_name[0]) gaa_mark_escape(func_name, slots[si].vaddr);
-                            break;
-                        }
-                    }
-
-                    char tmp_name[64];
-                    snprintf(tmp_name, sizeof(tmp_name), "__ret_%d", autodel_counter++);
-
-                    Node ret_expr_copy = *ret_expr;
-                    Node tmpvar  = make_tempvar_node(tmp_name, slots[si].base_type, &ret_expr_copy);
-                    Node del     = make_delete_node(slots[si].names[0]);
-                    Node new_ret = make_return_var_node(tmp_name);
-
-                    vec->data[i] = new_ret;
-                    vn_insert_at(vec, i, del);
-                    vn_insert_at(vec, i, tmpvar);
-                    end += 2;
-                    i   += 2;
-
-                    slots[si].escaped = 1;
-                    if (func_name && func_name[0]) gaa_mark_escape(func_name, slots[si].vaddr);
-                    break;
-                }
-            }
-        }
-        if (n->childs && n->type != NODE_RETURN) {
-            mutate_returns_recursive(n->childs, 0, n->childs->size, slots, slot_count, func_name);
+            collect_aliases_in_node(&n->childs->data[i], slots, slot_count, changed, func_name);
         }
     }
 }
@@ -911,40 +879,24 @@ typedef struct {
 
 /* ═══════════════════════════════════════════════════════════════════
  * Control Flow Graph (CFG)
- *
- * Каждый CFGBlock соответствует одному «прямолинейному» участку AST:
- *   – телу функции между операторами ветвления
- *   – телу if / else / for / while / do-while
- *
- * Рёбра: succ[] — список преемников (обычно ≤2).
- * Данные liveness хранятся побитово: bit[i] ↔ слот i.
- * Максимальное число слотов = MAX_VADDR_VARS (128).
- *
- * Алгоритм (backward dataflow, May-analysis):
- *   live_out[B] = ⋃  live_in[S]   для каждого преемника S
- *   live_in[B]  = use[B] ∪ (live_out[B] \ def[B])
- * Итерируем до fixpoint.
  * ═══════════════════════════════════════════════════════════════════ */
-
-#define CFG_MAX_BLOCKS  512
+/* FIX 3: Увеличиваем лимит CFG блоков */
+#define CFG_MAX_BLOCKS  4096
 #define CFG_MAX_SUCCS     4
-#define CFG_SLOT_WORDS  ((MAX_VADDR_VARS + 63) / 64)   /* 2 uint64 для 128 слотов */
+#define CFG_SLOT_WORDS  ((MAX_VADDR_VARS + 63) / 64) 
 
 typedef struct {
-    /* Ссылка на фрагмент AST */
-    vector_node *vec;   /* вектор, содержащий операторы блока   */
-    int          start; /* индекс первого оператора (включ.)    */
-    int          end;   /* индекс последнего оператора (включ.) */
+    vector_node *vec;   
+    int          start; 
+    int          end;   
 
-    /* Рёбра */
     int succ[CFG_MAX_SUCCS];
     int succ_count;
-    int pred[CFG_MAX_SUCCS * 4]; /* простой список предшественников */
+    int pred[CFG_MAX_SUCCS * 4]; 
     int pred_count;
 
-    /* Liveness битсеты */
-    uint64_t use [CFG_SLOT_WORDS]; /* используется в блоке до определения  */
-    uint64_t def [CFG_SLOT_WORDS]; /* определяется (убивается) в блоке     */
+    uint64_t use [CFG_SLOT_WORDS]; 
+    uint64_t def [CFG_SLOT_WORDS]; 
     uint64_t live_in [CFG_SLOT_WORDS];
     uint64_t live_out[CFG_SLOT_WORDS];
 } CFGBlock;
@@ -952,11 +904,9 @@ typedef struct {
 typedef struct {
     CFGBlock blocks[CFG_MAX_BLOCKS];
     int      count;
-    int      entry; /* индекс entry-блока  */
-    int      exit;  /* индекс virtual exit */
+    int      entry; 
+    int      exit;  
 } CFG;
-
-/* ─── Битсет-хелперы ──────────────────────────────────────────────── */
 
 static void bs_clear(uint64_t *w) {
     for (int i = 0; i < CFG_SLOT_WORDS; i++) w[i] = 0;
@@ -968,7 +918,7 @@ static void bs_set(uint64_t *w, int bit) {
 static int bs_test(const uint64_t *w, int bit) {
     if (bit < 0) return 0;
     if (bit >= MAX_VADDR_VARS) {
-        fprintf(stderr, "Error: buffer overflow -> out of memory");
+        fprintf(stderr, "Error: buffer overflow -> out of memory\n");
         exit(1);
     }
     return (w[bit >> 6] >> (bit & 63)) & 1;
@@ -982,19 +932,19 @@ static int bs_or_changed(uint64_t *dst, const uint64_t *src) {
     }
     return ch;
 }
-/* dst = src2 & ~src3  (set difference) */
 static void bs_andnot(uint64_t *dst, const uint64_t *src2, const uint64_t *src3) {
     for (int i = 0; i < CFG_SLOT_WORDS; i++)
         dst[i] = src2[i] & ~src3[i];
 }
 
-/* ─── Построение CFG ──────────────────────────────────────────────── */
-
-/* Прямое объявление: cfg_build_vec заполняет блоки из вектора */
 static int cfg_build_vec(CFG *cfg, vector_node *vec, int start, int end, int after_block);
 
 static int cfg_new_block(CFG *cfg) {
-    if (cfg->count >= CFG_MAX_BLOCKS) return -1;
+    /* FIX 3: Защита от переполнения графа без "тихих падений" */
+    if (cfg->count >= CFG_MAX_BLOCKS) {
+        fprintf(stderr, "Error: CFG limit exceeded! Function is too complex. Increase CFG_MAX_BLOCKS.\n");
+        exit(1);
+    }
     int id = cfg->count++;
     CFGBlock *b = &cfg->blocks[id];
     b->vec        = NULL;
@@ -1017,29 +967,18 @@ static void cfg_add_edge(CFG *cfg, int from, int to) {
     if (t->pred_count < CFG_MAX_SUCCS * 4) t->pred[t->pred_count++] = from;
 }
 
-/*
- * cfg_build_vec: рекурсивно строит CFG из вектора [start, end).
- * Возвращает id блока, который «выходит» из этого фрагмента,
- * чтобы вызывающий мог добавить ребро к продолжению.
- * after_block — id блока, куда должны идти «fall-through» рёбра
- * из конца данного фрагмента (-1 = виртуальный exit).
- */
 static int cfg_build_vec(CFG *cfg, vector_node *vec, int start, int end, int after_block) {
-    /* Создаём текущий «линейный» блок */
     int cur = cfg_new_block(cfg);
     if (cur < 0) return -1;
     cfg->blocks[cur].vec   = vec;
     cfg->blocks[cur].start = start;
-    cfg->blocks[cur].end   = start - 1; /* пока пуст */
+    cfg->blocks[cur].end   = start - 1; 
 
     for (int j = start; j < end; j++) {
         Node *n = &vec->data[j];
 
         if (n->type == NODE_IF && n->childs) {
-            /* Закрываем текущий линейный блок */
             cfg->blocks[cur].end = j - 1;
-
-            /* Блок для условия (сам if — одна инструкция) */
             int cond_blk = cfg_new_block(cfg);
             if (cond_blk < 0) break;
             cfg->blocks[cond_blk].vec   = vec;
@@ -1047,14 +986,12 @@ static int cfg_build_vec(CFG *cfg, vector_node *vec, int start, int end, int aft
             cfg->blocks[cond_blk].end   = j;
             cfg_add_edge(cfg, cur, cond_blk);
 
-            /* Блок-слияние после if */
             int merge_blk = cfg_new_block(cfg);
             if (merge_blk < 0) break;
             cfg->blocks[merge_blk].vec   = vec;
             cfg->blocks[merge_blk].start = j + 1;
-            cfg->blocks[merge_blk].end   = j;     /* пуст, заполнится дальше */
+            cfg->blocks[merge_blk].end   = j;     
 
-            /* Ветви then / else */
             int has_else = 0;
             for (unsigned long long k = 0; k < n->childs->size; k++) {
                 Node *child = &n->childs->data[k];
@@ -1074,10 +1011,7 @@ static int cfg_build_vec(CFG *cfg, vector_node *vec, int start, int end, int aft
                     }
                 }
             }
-            /* Если else нет — прямое ребро cond → merge */
             if (!has_else) cfg_add_edge(cfg, cond_blk, merge_blk);
-
-            /* Продолжаем в merge_blk */
             cur = merge_blk;
             cfg->blocks[cur].start = j + 1;
             continue;
@@ -1085,17 +1019,13 @@ static int cfg_build_vec(CFG *cfg, vector_node *vec, int start, int end, int aft
 
         if ((n->type == NODE_WHILE || n->type == NODE_FOR ||
              n->type == NODE_DO_WHILE) && n->childs) {
-            /* Закрываем линейный блок */
             cfg->blocks[cur].end = j - 1;
-
-            /* Блок заголовка цикла */
             int hdr = cfg_new_block(cfg);
             if (hdr < 0) break;
             cfg->blocks[hdr].vec   = vec;
             cfg->blocks[hdr].start = j;
             cfg->blocks[hdr].end   = j;
 
-            /* Блок после цикла */
             int after = cfg_new_block(cfg);
             if (after < 0) break;
             cfg->blocks[after].vec   = vec;
@@ -1104,7 +1034,6 @@ static int cfg_build_vec(CFG *cfg, vector_node *vec, int start, int end, int aft
 
             cfg_add_edge(cfg, cur, hdr);
 
-            /* Тело цикла */
             for (unsigned long long k = 0; k < n->childs->size; k++) {
                 Node *child = &n->childs->data[k];
                 if (child->type == NODE_SCOPE && child->childs) {
@@ -1114,22 +1043,16 @@ static int cfg_build_vec(CFG *cfg, vector_node *vec, int start, int end, int aft
                 }
             }
 
-            /* hdr → тело и hdr → after (exit condition) */
             cfg_add_edge(cfg, hdr, after);
-
             cur = after;
             cfg->blocks[cur].start = j + 1;
             continue;
         }
 
-        /* Обычная инструкция — расширяем текущий линейный блок */
         cfg->blocks[cur].end = j;
-
-        /* Early exit: return / break / continue */
         if (n->type == NODE_RETURN) {
             int ab = (after_block >= 0) ? after_block : cfg->exit;
             cfg_add_edge(cfg, cur, ab);
-            /* Начинаем мёртвый блок для кода после return */
             int dead = cfg_new_block(cfg);
             if (dead < 0) break;
             cfg->blocks[dead].vec   = vec;
@@ -1139,37 +1062,24 @@ static int cfg_build_vec(CFG *cfg, vector_node *vec, int start, int end, int aft
         }
     }
 
-    /* Fall-through из конца блока */
     int ab = (after_block >= 0) ? after_block : cfg->exit;
     cfg_add_edge(cfg, cur, ab);
     return cur;
 }
 
-/* Инициализация и построение полного CFG функции */
 static void cfg_init(CFG *cfg) {
     cfg->count = 0;
-    cfg->entry = cfg_new_block(cfg); /* 0 = entry */
-    cfg->exit  = cfg_new_block(cfg); /* 1 = virtual exit */
+    cfg->entry = cfg_new_block(cfg); 
+    cfg->exit  = cfg_new_block(cfg); 
 }
 
 static void cfg_build(CFG *cfg, vector_node *scope_vec) {
     cfg_init(cfg);
-    /* entry → тело → exit */
     cfg_build_vec(cfg, scope_vec, 0, (int)scope_vec->size, cfg->exit);
     cfg_add_edge(cfg, cfg->entry,
-                 cfg->count > 2 ? 2 : cfg->exit); /* entry → первый реальный блок */
+                 cfg->count > 2 ? 2 : cfg->exit); 
 }
 
-/* ─── Заполнение use/def для одного блока ────────────────────────── */
-
-/*
- * Для целей liveness:
- *   use[B][i] = 1  если слот i читается в блоке до своего определения
- *   def[B][i] = 1  если слот i определяется (delete-вставка или new) в блоке
- *
- * Мы заполняем use/def *по слотам* (не по переменным), используя
- * уже вычисленную таблицу slots[].
- */
 static void cfg_fill_use_def(CFG *cfg, VAddrSlot *slots, int slot_count) {
     for (int bi = 0; bi < cfg->count; bi++) {
         CFGBlock *b = &cfg->blocks[bi];
@@ -1178,11 +1088,9 @@ static void cfg_fill_use_def(CFG *cfg, VAddrSlot *slots, int slot_count) {
             Node *n = &b->vec->data[j];
             for (int si = 0; si < slot_count; si++) {
                 if (slot_used_in_node(n, &slots[si])) {
-                    /* Если слот ещё не определён в блоке — это USE */
                     if (!bs_test(b->def, si))
                         bs_set(b->use, si);
                 }
-                /* NODE_VAR_DEF autodel: считается определением */
                 if (n->type == NODE_VAR_DEF && n->childs && n->childs->size >= 2) {
                     const char *ts = n->childs->data[0].str ? n->childs->data[0].str : "";
                     if (strncmp(ts, "autodel:", 8) == 0) {
@@ -1200,16 +1108,12 @@ static void cfg_fill_use_def(CFG *cfg, VAddrSlot *slots, int slot_count) {
     }
 }
 
-/* ─── Итеративный backward liveness ──────────────────────────────── */
 static void cfg_liveness(CFG *cfg) {
     int changed = 1;
     while (changed) {
         changed = 0;
-        /* Backward: проходим в обратном порядке блоков */
         for (int bi = cfg->count - 1; bi >= 0; bi--) {
             CFGBlock *b = &cfg->blocks[bi];
-
-            /* live_out[B] = ⋃ live_in[S] для всех преемников S */
             uint64_t new_out[CFG_SLOT_WORDS];
             bs_clear(new_out);
             for (int s = 0; s < b->succ_count; s++) {
@@ -1219,7 +1123,6 @@ static void cfg_liveness(CFG *cfg) {
             }
             if (bs_or_changed(b->live_out, new_out)) changed = 1;
 
-            /* live_in[B] = use[B] ∪ (live_out[B] \ def[B]) */
             uint64_t new_in[CFG_SLOT_WORDS];
             bs_andnot(new_in, b->live_out, b->def);
             for (int i = 0; i < CFG_SLOT_WORDS; i++) new_in[i] |= b->use[i];
@@ -1228,74 +1131,147 @@ static void cfg_liveness(CFG *cfg) {
     }
 }
 
-/*
- * cfg_last_use_point: возвращает (через out-параметры) вектор и индекс,
- * ПОСЛЕ которого нужно вставить delete для слота si.
- *
- * Алгоритм:
- *   Ищем последний basic block B такой, что:
- *     bs_test(live_in[B], si) == 1  ИЛИ  slot_used_in_node в блоке
- *   и хотя бы в одном из его преемников live_in[succ] не содержит si.
- *   Это — «выход» слота.
- *   Внутри блока ищем последнее физическое использование.
- */
-static void cfg_last_use_point(CFG *cfg, int si,
-                                VAddrSlot *slots,
-                                vector_node **out_vec, int *out_idx) {
-    *out_vec = NULL;
-    *out_idx = -1;
+/* ═══════════════════════════════════════════════════════════════════
+ * STATIC GC: Анализ графа и вставка DELETE
+ * ═══════════════════════════════════════════════════════════════════ */
 
-    /* Блоки, в которых слот живой (live_in или live_out) */
-    for (int bi = cfg->count - 1; bi >= 0; bi--) {
-        CFGBlock *b = &cfg->blocks[bi];
-        if (!b->vec || b->start > b->end) continue;
+/* 1. Поиск путей без return (Reachability Analysis) */
+static int dfs_reach_exit_without_return(CFGBlock *b, uint8_t *visited, CFGBlock *exit_node, CFG *cfg) {
+    if (b == exit_node) return 1;
+    int id = b - cfg->blocks;
+    if (visited[id]) return 0;
+    visited[id] = 1;
 
-        int live_here = bs_test(b->live_in,  si) ||
-                        bs_test(b->live_out, si);
-        if (!live_here) continue;
-
-        /* Проверяем, что хотя бы один преемник НЕ держит слот живым */
-        int dies_after = 0;
-        if (b->succ_count == 0) {
-            dies_after = 1;
-        } else {
-            for (int s = 0; s < b->succ_count; s++) {
-                int sid = b->succ[s];
-                if (sid < 0 || sid >= cfg->count ||
-                    !bs_test(cfg->blocks[sid].live_in, si))
-                    dies_after = 1;
-            }
-        }
-        if (!dies_after) continue;
-
-        /* Нашли последний живой блок. Ищем последнее использование внутри. */
-        *out_vec = b->vec;
-        *out_idx = b->start; /* fallback — начало блока */
-
-        int lim = b->end;
-        if (lim >= (int)b->vec->size) lim = (int)b->vec->size - 1;
-        for (int j = b->start; j <= lim; j++) {
-            if (slot_used_in_node(&b->vec->data[j], &slots[si]))
-                *out_idx = j;
-        }
-        return; /* Достаточно первого найденного блока (reverse order) */
+    if (b->vec && b->start <= b->end) {
+        Node *last_node = &b->vec->data[b->end];
+        if (last_node->type == NODE_RETURN) return 0; /* Путь безопасно оборван */
     }
 
-    /* Fallback: если слот вообще нигде не используется — точка рождения */
-    if (*out_vec == NULL) {
-        *out_vec = slots[si].birth_vec;
-        *out_idx = slots[si].birth_idx;
+    for (int i = 0; i < b->succ_count; i++) {
+        int next_id = b->succ[i];
+        if (next_id >= 0 && next_id < cfg->count) {
+            if (dfs_reach_exit_without_return(&cfg->blocks[next_id], visited, exit_node, cfg)) return 1;
+        }
+    }
+    return 0;
+}
+
+static void check_return_paths(CFG *cfg, int is_void, const char *func_name) {
+    if (is_void || !func_name || !func_name[0]) return;
+    uint8_t visited[CFG_MAX_BLOCKS] = {0};
+    if (dfs_reach_exit_without_return(&cfg->blocks[cfg->entry], visited, &cfg->blocks[cfg->exit], cfg)) {
+        fprintf(stderr, "\n[Compile Error]: Control reaches end of non-void function '%s'\n", func_name);
+        exit(1);
+    }
+}
+
+/* 2. Отложенная вставка (Защита от смещения индексов AST) */
+typedef struct {
+    vector_node *vec;
+    int idx;
+    char name[64];
+    int insert_after;
+} SGCInsertion;
+
+static SGCInsertion sgc_ins[1024];
+static int sgc_ins_count = 0;
+
+static void sgc_add_ins(vector_node *vec, int idx, const char *name, int after) {
+    if (sgc_ins_count >= 1024) return;
+    sgc_ins[sgc_ins_count].vec = vec;
+    sgc_ins[sgc_ins_count].idx = idx;
+    strncpy(sgc_ins[sgc_ins_count].name, name, 63);
+    sgc_ins[sgc_ins_count].insert_after = after;
+    sgc_ins_count++;
+}
+
+static int get_slot_idx(Node *n, VAddrSlot *slots, int count) {
+    const char *base = get_base_var(n);
+    if (!base) return -1;
+    return find_slot_by_name(slots, count, base);
+}
+
+/* 3. Главный движок SGC */
+static void sgc_apply_deletes(CFG *cfg, VAddrSlot *slots, int slot_count) {
+    sgc_ins_count = 0;
+
+    for (int i = 0; i < cfg->count; i++) {
+        CFGBlock *b = &cfg->blocks[i];
+        if (!b->vec || b->start > b->end) continue;
+
+        uint64_t current_live[CFG_SLOT_WORDS];
+        for (int w = 0; w < CFG_SLOT_WORDS; w++) current_live[w] = b->live_in[w];
+
+        for (int j = b->start; j <= b->end && j < (int)b->vec->size; j++) {
+            Node *n = &b->vec->data[j];
+
+            /* ПРАВИЛО 1: Kill Points (Переприсваивание) */
+            if (n->type == NODE_ASSIGN || n->type == NODE_VAR_DEF) {
+                Node *lhs = (n->type == NODE_ASSIGN) ? &n->childs->data[0] : &n->childs->data[1];
+                int si = get_slot_idx(lhs, slots, slot_count);
+                if (si >= 0 && !slots[si].escaped) {
+                    if (bs_test(current_live, si)) {
+                        /* Убиваем старый объект строго ПЕРЕД присваиванием */
+                        sgc_add_ins(b->vec, j, slots[si].names[0], 0); 
+                    }
+                    bs_set(current_live, si); /* Объект снова жив */
+                }
+            }
+
+            for (int si = 0; si < slot_count; si++) {
+                if (slot_used_in_node(n, &slots[si])) bs_set(current_live, si);
+            }
+
+            /* ПРАВИЛО 2: Return Points */
+            if (n->type == NODE_RETURN) {
+                int ret_si = (n->childs && n->childs->size > 0) ? get_slot_idx(&n->childs->data[0], slots, slot_count) : -1;
+                for (int si = 0; si < slot_count; si++) {
+                    if (si == ret_si) continue; /* Не удаляем то, что возвращаем */
+                    if (bs_test(current_live, si) && !slots[si].escaped) {
+                        sgc_add_ins(b->vec, j, slots[si].names[0], 0); /* ПЕРЕД return */
+                    }
+                }
+                break;
+            }
+        }
+
+        /* ПРАВИЛО 3: Death Points (Конец жизни в блоке) */
+        for (int si = 0; si < slot_count; si++) {
+            if (bs_test(current_live, si) && !bs_test(b->live_out, si) && !slots[si].escaped) {
+                int last_j = b->start;
+                for (int k = b->end; k >= b->start; k--) {
+                    if (k < (int)b->vec->size && slot_used_in_node(&b->vec->data[k], &slots[si])) {
+                        last_j = k; break;
+                    }
+                }
+                sgc_add_ins(b->vec, last_j, slots[si].names[0], 1); /* ПОСЛЕ последнего использования */
+            }
+        }
+    }
+
+    /* Применяем вставки с конца, чтобы не съехали индексы */
+    for (int i = 0; i < sgc_ins_count - 1; i++) {
+        for (int k = i + 1; k < sgc_ins_count; k++) {
+            if (sgc_ins[i].vec < sgc_ins[k].vec || 
+               (sgc_ins[i].vec == sgc_ins[k].vec && sgc_ins[i].idx < sgc_ins[k].idx)) {
+                SGCInsertion tmp = sgc_ins[i]; sgc_ins[i] = sgc_ins[k]; sgc_ins[k] = tmp;
+            }
+        }
+    }
+    for (int i = 0; i < sgc_ins_count; i++) {
+        Node del = make_delete_node(sgc_ins[i].name);
+        vn_insert_at(sgc_ins[i].vec, sgc_ins[i].idx + sgc_ins[i].insert_after, del);
     }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
- * pregen_scope
+ * pregen_scope 
  * ═══════════════════════════════════════════════════════════════════ */
 static void pregen_scope(vector_node *nodes, int start, int end,
-                         const char *func_name, Node *params_node) {
+                         const char *func_name, Node *params_node, int insert_deletes, int is_void) {
 
-    /* ── 0. Регистрируем функцию в индексе ───────────────────────────── */
-    if (func_name && func_name[0]) {
+    /* ── 0. Регистрируем функцию в индексе (только в Pass 1) ────────── */
+    if (!insert_deletes && func_name && func_name[0]) {
         FuncRecord *fr = func_index_get_or_add(func_name);
         if (fr && params_node)
             func_index_register_params(fr, params_node);
@@ -1303,32 +1279,32 @@ static void pregen_scope(vector_node *nodes, int start, int end,
             fr->returns_ptr = ownership_func_lookup(func_name);
     }
 
-    /* Рекурсивный спуск в блоки */
     for (int j = start; j < end; j++) {
         Node *n = &nodes->data[j];
-        if (n->type == NODE_FUNC_DEF && n->childs->size >= 4) {
+        if (n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+            n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) {
             Node *scope = &n->childs->data[3];
             const char *fn = n->childs->data[1].str ? n->childs->data[1].str : "";
             Node *p = (n->childs->size >= 3 && n->childs->data[2].type == NODE_PARAMS) ? &n->childs->data[2] : NULL;
-            if (scope->type == NODE_SCOPE) pregen_scope(scope->childs, 0, (int)scope->childs->size, fn, p);
+            if (scope->type == NODE_SCOPE) pregen_scope(scope->childs, 0, (int)scope->childs->size, fn, p, insert_deletes, is_void);
         } else if (n->type == NODE_SCOPE) {
-            pregen_scope(n->childs, 0, (int)n->childs->size, func_name, NULL);
+            pregen_scope(n->childs, 0, (int)n->childs->size, func_name, NULL, insert_deletes, is_void);
         } else if (node_is_block(n) && n->childs) {
             for (unsigned long long k = 0; k < n->childs->size; k++) {
                 Node *child = &n->childs->data[k];
                 if (child->type == NODE_SCOPE && child->childs)
-                    pregen_scope(child->childs, 0, (int)child->childs->size, func_name, NULL);
+                    pregen_scope(child->childs, 0, (int)child->childs->size, func_name, NULL, insert_deletes, is_void);
             }
         } else if (n->type == NODE_IF && n->childs) {
             for (unsigned long long k = 0; k < n->childs->size; k++) {
                 Node *child = &n->childs->data[k];
                 if (child->type == NODE_SCOPE && child->childs)
-                    pregen_scope(child->childs, 0, (int)child->childs->size, func_name, NULL);
+                    pregen_scope(child->childs, 0, (int)child->childs->size, func_name, NULL, insert_deletes, is_void);
                 else if (child->type == NODE_ELSE && child->childs)
                     for (unsigned long long m = 0; m < child->childs->size; m++) {
                         Node *ec = &child->childs->data[m];
                         if (ec->type == NODE_SCOPE && ec->childs)
-                            pregen_scope(ec->childs, 0, (int)ec->childs->size, func_name, NULL);
+                            pregen_scope(ec->childs, 0, (int)ec->childs->size, func_name, NULL, insert_deletes, is_void);
                     }
             }
         }
@@ -1337,14 +1313,13 @@ static void pregen_scope(vector_node *nodes, int start, int end,
     VAddrSlot slots[MAX_VADDR_VARS];
     int slot_count = 0;
 
-    /* 1. Локальные autodel-переменные (ПАРАМЕТРОВ БОЛЬШЕ НЕТ) */
     for (int j = start; j < end; j++) {
         Node *n = &nodes->data[j];
         if (n->type != NODE_VAR_DEF || n->childs->size < 2) continue;
         const char *type_str = n->childs->data[0].str;
         if (strncmp(type_str, "autodel:", 8) != 0) continue;
         if (slot_count >= MAX_VADDR_VARS) {
-            fprintf(stderr, "Error: buffer overflow -> out of memory");
+            fprintf(stderr, "Error: buffer overflow -> out of memory\n");
             exit(1);
         };
 
@@ -1352,12 +1327,12 @@ static void pregen_scope(vector_node *nodes, int start, int end,
         s->vaddr       = vaddr_pop();
         s->name_count  = 0;
         s->field_count = 0;
+        s->idx_alias_count = 0;
+        s->mirror_count = 0;
         s->escaped     = 0;
         
         s->birth_vec   = nodes;
         s->birth_idx   = j;
-        s->limit_vec   = NULL;
-        s->limit_idx   = -1;
 
         strncpy(s->base_type, type_str + 8, 63);
         s->base_type[63] = '\0';
@@ -1368,18 +1343,15 @@ static void pregen_scope(vector_node *nodes, int start, int end,
 
     if (slot_count == 0) return;
 
-    /* 2. ГЛУБОКОЕ Распространение алиасов */
+    /* 3. Глубокое распространение field-алиасов, зеркал и escapes */
     int changed = 1;
     while (changed) {
         changed = 0;
         for (int j = start; j < end; j++) {
-            collect_aliases_in_node(&nodes->data[j], slots, slot_count, &changed);
+            collect_aliases_in_node(&nodes->data[j], slots, slot_count, &changed, func_name);
         }
     }
 
-    /* 2b. Записываем эффекты параметров-указателей в глобальный граф.
-     *     Для каждого параметра-указателя смотрим, какие алиасы и field-aliases
-     *     накопились у его слота, и сохраняем их как эффекты callee. */
     if (func_name && func_name[0] && params_node && params_node->type == NODE_PARAMS) {
         int pidx = 0;
         for (unsigned long long pi = 0; pi < params_node->childs->size; pi++) {
@@ -1390,17 +1362,14 @@ static void pregen_scope(vector_node *nodes, int start, int end,
             int tlen = (int)strlen(type_str);
             int is_ptr = (tlen > 0 && type_str[tlen - 1] == '*') ? 1 : 0;
             if (is_ptr && pname[0]) {
-                /* Ищем слот по имени параметра (включая escaped — параметр мог убежать) */
                 int si = find_slot_by_name_any(slots, slot_count, pname);
                 if (si >= 0) {
                     VAddrSlot *s = &slots[si];
                     gaa_push(func_name, pidx, s->vaddr);
-                    /* Алиасы (все имена кроме самого параметра) */
                     for (int k = 0; k < s->name_count; k++) {
                         if (strcmp(s->names[k], pname) != 0)
                             gaa_add_alias_effect(func_name, pidx, s->vaddr, s->names[k]);
                     }
-                    /* Field-aliases */
                     for (int k = 0; k < s->field_count; k++) {
                         gaa_add_field_effect(func_name, pidx, s->vaddr,
                                              s->fields[k].obj, s->fields[k].field,
@@ -1414,10 +1383,44 @@ static void pregen_scope(vector_node *nodes, int start, int end,
         }
     }
 
-    /* 3. ГЛУБОКИЙ Split-Lifetime */
-    split_lifetime_recursive(nodes, start, end, slots, &slot_count);
+    if (func_name && func_name[0] && params_node && params_node->type == NODE_PARAMS) {
+        int pidx = 0;
+        for (unsigned long long pi = 0; pi < params_node->childs->size; pi++) {
+            Node *p = &params_node->childs->data[pi];
+            if (p->type != NODE_VAR_DEF || !p->childs || p->childs->size < 2) continue;
+            const char *pname    = p->childs->data[1].str ? p->childs->data[1].str : "";
+            const char *type_str = p->childs->data[0].str ? p->childs->data[0].str : "";
+            int tlen = (int)strlen(type_str);
 
-    /* 4. Глобальный граф вызовов + применение эффектов callee к слотам caller */
+            int is_ptr = 0;
+            for (int ti = 0; ti < tlen; ti++)
+                if (type_str[ti] == '*') { is_ptr = 1; break; }
+
+            char embedded_lt = '\0';
+            if (is_ptr) {
+                for (int ti = tlen - 1; ti >= 0; ti--) {
+                    char c = type_str[ti];
+                    if (c == 'a' || c == 'b' || c == 'c') { embedded_lt = c; break; }
+                    if (c == '*') break; 
+                }
+                if (!embedded_lt && tlen > 0) {
+                    char last = type_str[tlen - 1];
+                    if (last == 'a' || last == 'b' || last == 'c') embedded_lt = last;
+                }
+            }
+
+            if (is_ptr && embedded_lt == 'c' && pname[0]) {
+                int si = find_slot_by_name_any(slots, slot_count, pname);
+                char resolved = 'a';
+                if (si >= 0 && slots[si].escaped) resolved = 'b';
+                GlobalArgAlias *gae = gaa_get_or_push(func_name, pidx,
+                                          si >= 0 ? slots[si].vaddr : 0);
+                if (gae) gae->resolved_lifetime = resolved;
+            }
+            pidx++;
+        }
+    }
+
     for (int j = start; j < end; j++) {
         Node *n = &nodes->data[j];
         if (n->type != NODE_FUNC_CALL || !n->str || !n->str[0]) continue;
@@ -1432,32 +1435,22 @@ static void pregen_scope(vector_node *nodes, int start, int end,
             if (base) {
                 int si = find_slot_by_name(slots, slot_count, base);
                 if (si >= 0) {
-                    /* Регистрируем передачу */
                     gaa_push(callee, param_idx, slots[si].vaddr);
-
-                    /* Применяем сохранённые эффекты callee к нашему слоту.
-                     * Ищем запись о callee/param_idx в глобальном графе.
-                     * Там могут быть алиасы и field-aliases собранные из тела callee —
-                     * добавляем их в слот caller, чтобы дальнейший анализ
-                     * (split-lifetime, escape, delete-insertion) их учёл. */
                     for (int gi = 0; gi < g_arg_alias_count; gi++) {
                         GlobalArgAlias *gae = &g_arg_aliases[gi];
                         if (strcmp(gae->func_name, callee) != 0) continue;
                         if (gae->param_idx != param_idx) continue;
-                        /* Алиасы */
                         for (int ai = 0; ai < gae->alias_effect_count; ai++) {
                             int before = slots[si].name_count;
                             slot_add_name(&slots[si], gae->alias_effects[ai].alias);
-                            (void)before; /* изменения учитываются при след. итерации */
+                            (void)before; 
                         }
-                        /* Field-aliases */
                         for (int fi = 0; fi < gae->field_effect_count; fi++) {
                             slot_add_field(&slots[si],
                                            gae->field_effects[fi].obj,
                                            gae->field_effects[fi].field,
                                            gae->field_effects[fi].is_arrow);
                         }
-                        /* Escape */
                         if (gae->escapes_out) {
                             slots[si].escaped = 1;
                             gaa_mark_escape(func_name ? func_name : "", slots[si].vaddr);
@@ -1469,118 +1462,164 @@ static void pregen_scope(vector_node *nodes, int start, int end,
         }
     }
 
-    /* 5. Рекурсивная мутация возвратов (Escape) */
-    mutate_returns_recursive(nodes, start, end, slots, slot_count, func_name);
+    if (insert_deletes) {
+        for (int j = end - 1; j >= start; j--) {
+            Node *n = &nodes->data[j];
+            if (n->type != NODE_MEMBER_ASSIGN || n->childs->size < 3) continue;
+            Node *member = &n->childs->data[0];
+            if (!member->childs || member->childs->size < 1) continue;
+            if (!member->str || !member->str[0]) continue;
+            const char *written_obj   = member->childs->data[0].str;
+            const char *written_field = member->str;
+            int written_arrow = (member->type == NODE_MEMBER_ARROW);
+            if (!written_obj || !written_field) continue;
 
-    /* 6. Строим CFG скопа и вычисляем liveness */
-    CFG cfg;
-    cfg_build(&cfg, nodes);
-    cfg_fill_use_def(&cfg, slots, slot_count);
-    cfg_liveness(&cfg);
+            for (int si = 0; si < slot_count; si++) {
+                for (int mi = 0; mi < slots[si].mirror_count; mi++) {
+                    MirrorAlias *ma = &slots[si].mirrors[mi];
+                    if (ma->is_addr_of) continue; 
+                    if (strcmp(ma->owner_obj,   written_obj)   != 0) continue;
+                    if (strcmp(ma->owner_field, written_field) != 0) continue;
+                    if (ma->is_arrow != written_arrow)               continue;
 
-    /* 6b. Подготовка и сортировка вставок delete */
-    Insertion ins[MAX_VADDR_VARS];
-    int ins_count = 0;
+                    Node rhs_member;
+                    rhs_member.type   = ma->is_arrow ? NODE_MEMBER_ARROW : NODE_MEMBER_DOT;
+                    rhs_member.str    = malloc(strlen(ma->owner_field) + 1);
+                    strcpy(rhs_member.str, ma->owner_field);
+                    rhs_member.childs = malloc(sizeof(vector_node));
+                    vn_init(rhs_member.childs, 1);
+                    Node owner_var = {NODE_VAR, NULL, malloc(strlen(ma->owner_obj) + 1), NULL};
+                    strcpy(owner_var.str, ma->owner_obj);
+                    owner_var.childs = NULL;
+                    vn_push_back(rhs_member.childs, owner_var);
 
-    for (int si = 0; si < slot_count; si++) {
-        if (slots[si].escaped) {
+                    Node mirror_assign;
+                    mirror_assign.type   = NODE_ASSIGN;
+                    mirror_assign.str    = NULL;
+                    mirror_assign.childs = malloc(sizeof(vector_node));
+                    vn_init(mirror_assign.childs, 3);
+
+                    Node lhs_node = {NODE_VAR, NULL, malloc(strlen(ma->alias_var) + 1), NULL};
+                    strcpy(lhs_node.str, ma->alias_var);
+                    lhs_node.childs = NULL;
+
+                    Node op_node = {NODE_IDENT, NULL, malloc(2), NULL};
+                    strcpy(op_node.str, "=");
+                    op_node.childs = NULL;
+
+                    vn_push_back(mirror_assign.childs, lhs_node);
+                    vn_push_back(mirror_assign.childs, op_node);
+                    vn_push_back(mirror_assign.childs, rhs_member);
+
+                    vn_insert_at(nodes, j + 1, mirror_assign);
+                    end++; 
+                }
+            }
+        }
+    }
+
+    if (insert_deletes) {
+        for (int j = start; j < end; j++) {
+            Node *n = &nodes->data[j];
+            if (n->type != NODE_FUNC_CALL || !n->str || !n->str[0]) continue;
+            if (!n->childs) continue;
+
+            OverloadEntry *ext = NULL;
+            for (int m = 0; m < num_imported_modules && !ext; m++) {
+                OverloadEntry *mod = global_modules_overloads[m];
+                int cnt = global_modules_counts[m];
+                for (int ei = 0; ei < cnt; ei++) {
+                    if (strcmp(mod[ei].mangled, n->str) == 0) {
+                        ext = &mod[ei];
+                        break;
+                    }
+                }
+            }
+            if (!ext) continue;
+
+            int param_idx = 0;
+            for (unsigned long long ci = 0; ci < n->childs->size; ci++) {
+                Node *arg = &n->childs->data[ci];
+                if (arg->type == NODE_ARGS) continue;
+                if (param_idx >= ext->param_count) { param_idx++; continue; }
+
+                char lt = ext->param_lifetimes[param_idx];
+
+                if (lt == 'c') {
+                    for (int gi = 0; gi < g_arg_alias_count; gi++) {
+                        if (strcmp(g_arg_aliases[gi].func_name, n->str) == 0 &&
+                            g_arg_aliases[gi].param_idx == param_idx &&
+                            g_arg_aliases[gi].resolved_lifetime != '\0') {
+                            lt = g_arg_aliases[gi].resolved_lifetime;
+                            break;
+                        }
+                    }
+                }
+
+                if (lt == 'b' || lt == 'c') {
+                    const char *arg_base = get_base_var(arg);
+                    if (arg_base) {
+                        int used_after = 0;
+                        for (int k = j + 1; k < end && !used_after; k++) {
+                            Node *stack[256];
+                            int top = 0;
+                            stack[top++] = &nodes->data[k];
+                            while (top > 0 && !used_after) {
+                                Node *cur = stack[--top];
+                                if (!cur) continue;
+                                if ((cur->type == NODE_VAR || cur->type == NODE_IDENT) &&
+                                    cur->str && strcmp(cur->str, arg_base) == 0) {
+                                    used_after = 1;
+                                    break;
+                                }
+                                if (cur->childs)
+                                    for (unsigned long long ci2 = 0;
+                                         ci2 < cur->childs->size && top < 255; ci2++)
+                                        stack[top++] = &cur->childs->data[ci2];
+                            }
+                        }
+                        if (used_after) {
+                            fprintf(stderr,
+                                "pregen ERROR: pointer '%s' passed to extern function"
+                                " '%s' (param %d) with lifetime '%c' —"
+                                " pointer may be invalid after call but is used later.\n",
+                                arg_base, ext->base_name, param_idx, lt);
+                            exit(1);
+                        }
+                    }
+                }
+                param_idx++;
+            }
+        }
+    }
+
+    if (insert_deletes) {
+        CFG cfg;
+        cfg_build(&cfg, nodes);
+        cfg_fill_use_def(&cfg, slots, slot_count);
+        cfg_liveness(&cfg);
+
+        /* Проверяем, что все ветви не-void функции имеют return */
+        check_return_paths(&cfg, is_void, func_name);
+
+        /* Генерируем и вставляем DELETE */
+        sgc_apply_deletes(&cfg, slots, slot_count);
+
+        /* Освобождаем виртуальные адреса */
+        for (int si = 0; si < slot_count; si++) {
             vaddr_push_free(slots[si].vaddr);
-            continue;
         }
-
-        vector_node *l_vec = NULL;
-        int l_idx = -1;
-
-        if (slots[si].limit_vec != NULL) {
-            /* Слот разделён: удаление перед новым a = new() */
-            l_vec = slots[si].limit_vec;
-            l_idx = slots[si].limit_idx - 1;
-        } else {
-            /* Естественная смерть: спрашиваем CFG */
-            cfg_last_use_point(&cfg, si, slots, &l_vec, &l_idx);
-            /* Fallback на старое поведение, если CFG не нашёл блок */
-            if (!l_vec) {
-                l_vec = slots[si].birth_vec;
-                l_idx = slots[si].birth_idx;
-                for (unsigned long long i = (unsigned long long)slots[si].birth_idx;
-                     i < l_vec->size; i++) {
-                    if (slot_used_in_node(&l_vec->data[i], &slots[si]))
-                        l_idx = (int)i;
-                }
-            }
-        }
-
-        ins[ins_count].slot_idx = si;
-        ins[ins_count].vec      = l_vec;
-        ins[ins_count].idx      = l_idx;
-        ins_count++;
-    }
-
-    /* Сортируем вставки (от конца к началу), чтобы индексы при вставке не сбивались */
-    for (int i = 0; i < ins_count - 1; i++) {
-        for (int j = i + 1; j < ins_count; j++) {
-            if (ins[i].vec < ins[j].vec || 
-               (ins[i].vec == ins[j].vec && ins[i].idx < ins[j].idx)) {
-                Insertion tmp = ins[i];
-                ins[i] = ins[j];
-                ins[j] = tmp;
-            }
-        }
-    }
-
-    /* 7. Безопасная вставка узлов зануления и delete */
-    for (int i = 0; i < ins_count; i++) {
-        int si = ins[i].slot_idx;
-        vector_node *v = ins[i].vec;
-        int insert_pos = ins[i].idx + 1;
-
-        /* Проверяем, не вставлен ли delete уже (например, ручной delete в коде) */
-        int already_deleted = 0;
-        for (unsigned long long jj = insert_pos; jj < v->size; jj++) {
-            Node *nn = &v->data[jj];
-            if (nn->type == NODE_DELETE && nn->childs && nn->childs->size >= 2) {
-                Node *vn2 = &nn->childs->data[1];
-                if (vn2->type == NODE_VAR && vn2->str &&
-                    slots[si].name_count > 0 &&
-                    strcmp(vn2->str, slots[si].names[0]) == 0) {
-                    already_deleted = 1;
-                    /* Запоминаем позицию существующего delete, чтобы вставить
-                     * зануление алиасов СРАЗУ ПОСЛЕ него */
-                    insert_pos = (int)jj + 1;
-                    break;
-                }
-            }
-        }
-
-        if (!already_deleted) {
-            /* Вставляем delete перед зануляющими присвоениями, т.е. на insert_pos
-             * (зануления уже сдвинуты вперёд вставками выше — вставляем снова
-             * на исходную позицию, чтобы порядок был: delete, zero, zero, ...) */
-            int del_pos = ins[i].idx + 1; /* оригинальная позиция */
-            Node del = make_delete_node(slots[si].names[0]);
-            vn_insert_at(v, del_pos, del);
-        }
-
-        vaddr_push_free(slots[si].vaddr);
     }
 }
 
 /* ═══════════════════════════════════════════════════════════════════
  * Глобальные переменные-индексы (_idx_N)
- *
- * Для каждого arr[i] в AST:
- *   1. Создаём NODE_STATIC_VAR_DEF  _idx_N  с типом переменной i.
- *   2. Заменяем NODE_INDEX так, чтобы перед ним было присвоение
- *      _idx_N = i, а сам индекс использует _idx_N.
- *   3. Вставляем проверку границ: if (_idx_N < 0 || _idx_N >= size) abort()
- *      для массивов с известным размером (NODE_ARRAY_DEF).
  * ═══════════════════════════════════════════════════════════════════ */
 
-/* Таблица глобальных индексных переменных, которые были сгенерированы */
 #define MAX_IDX_VARS 256
 typedef struct {
-    char name[64];      /* _idx_N                              */
-    char idx_type[64];  /* тип (int, long, …)                  */
+    char name[64];      
+    char idx_type[64];  
 } IdxVarRecord;
 
 static IdxVarRecord g_idx_vars[MAX_IDX_VARS];
@@ -1591,10 +1630,6 @@ static void idx_var_reset(void) {
     g_idx_counter   = 0;
 }
 
-/* ─── Таблица известных размеров массивов (скоуп:имя → размер) ──── *
- * Ключ: "<func_name>:<arr_name>" для локальных, "<arr_name>" для    *
- * глобальных (func_name == NULL или "").  Это предотвращает коллизию *
- * одноимённых массивов в разных функциях.                            */
 #define MAX_ARR_SIZES 256
 typedef struct { char name[96]; char size[32]; } ArrSizeEntry;
 static ArrSizeEntry g_arr_sizes[MAX_ARR_SIZES];
@@ -1602,7 +1637,6 @@ static int          g_arr_size_count = 0;
 
 static void arr_size_reset(void) { g_arr_size_count = 0; }
 
-/* scope_func: имя функции-владельца или "" для глобального уровня */
 static void arr_size_register(const char *scope_func, const char *name, const char *size) {
     char key[96];
     if (scope_func && scope_func[0])
@@ -1618,7 +1652,6 @@ static void arr_size_register(const char *scope_func, const char *name, const ch
     g_arr_size_count++;
 }
 
-/* ─── Первый проход: собираем NODE_ARRAY_DEF размеры ─────────────── */
 static void collect_array_sizes_in_scope(vector_node *nodes, const char *scope_func) {
     for (unsigned long long j = 0; j < nodes->size; j++) {
         Node *n = &nodes->data[j];
@@ -1627,8 +1660,8 @@ static void collect_array_sizes_in_scope(vector_node *nodes, const char *scope_f
             const char *sz = n->childs->data[2].str ? n->childs->data[2].str : "";
             if (nm[0] && sz[0]) arr_size_register(scope_func, nm, sz);
         }
-        /* Спускаемся в тела функций со сменой скоупа */
-        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF) &&
+        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+             n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) &&
             n->childs && n->childs->size >= 4) {
             const char *fn = n->childs->data[1].str ? n->childs->data[1].str : "";
             Node *sc = &n->childs->data[3];
@@ -1644,23 +1677,22 @@ static void collect_array_sizes(vector_node *nodes) {
     collect_array_sizes_in_scope(nodes, "");
 }
 
-/* ─── Второй проход: заменяем arr[expr] → _idx_N=expr + bounds + arr[_idx_N] ── */
 static void inject_idx_vars(vector_node *nodes, int *start_p, int *end_p,
                             vector_node *root_nodes,
-                            vector_node *scope_nodes,   /* текущий скоуп функции */
-                            const char  *scope_func)    /* имя функции или ""   */
+                            vector_node *scope_nodes,   
+                            const char  *scope_func)    
 {
     int j = *start_p;
     while (j < *end_p) {
         Node *n = &nodes->data[j];
 
-        /* Рекурсия в блоки */
         if (n->type == NODE_SCOPE && n->childs) {
             int s = 0, e = (int)n->childs->size;
             inject_idx_vars(n->childs, &s, &e, root_nodes, scope_nodes, scope_func);
             j++; continue;
         }
-        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF) &&
+        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+             n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) &&
             n->childs && n->childs->size >= 4) {
             Node *scope = &n->childs->data[3];
             const char *fn = n->childs->data[1].str ? n->childs->data[1].str : "";
@@ -1690,7 +1722,6 @@ static void inject_idx_vars(vector_node *nodes, int *start_p, int *end_p,
             j++; continue;
         }
 
-        /* Ищем NODE_INDEX внутри текущего оператора */
         int found_index = 0;
         Node *stack[256];
         int   top = 0;
@@ -1708,11 +1739,10 @@ static void inject_idx_vars(vector_node *nodes, int *start_p, int *end_p,
             if (cur->type == NODE_INDEX && cur->childs && cur->childs->size >= 2) {
                 Node *idx_nd  = &cur->childs->data[1];
 
-                /* Только если индекс — переменная (не константа) */
                 if ((idx_nd->type == NODE_VAR || idx_nd->type == NODE_IDENT) &&
                     idx_nd->str && idx_nd->str[0]) {
 
-                    printf("Error: dynamic indexation in autodel");
+                    printf("Error: dynamic indexation in autodel\n");
                     exit(1);
                 }
             }
@@ -1729,9 +1759,7 @@ static void inject_idx_vars(vector_node *nodes, int *start_p, int *end_p,
     }
 }
 
-/* ─── Эмит глобальных NODE_STATIC_VAR_DEF для _idx_N переменных ──── */
 static void emit_idx_global_defs(vector_node *nodes) {
-    /* Вставляем в начало вектора верхнего уровня */
     for (int i = g_idx_var_count - 1; i >= 0; i--) {
         Node *vdef = make_node(NODE_STATIC_VAR_DEF, "");
         Node *type = make_node(NODE_TYPE,  g_idx_vars[i].idx_type);
@@ -1742,6 +1770,113 @@ static void emit_idx_global_defs(vector_node *nodes) {
         vn_push_back(vdef->childs, *init); free(init);
         vn_insert_at(nodes, 0, *vdef);
         free(vdef);
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+ * Контроль доступа к памяти в корутинах
+ * ═══════════════════════════════════════════════════════════════════ */
+typedef struct {
+    char names[256][64];
+    int count;
+    int is_active;
+} CoroutineContext;
+
+static CoroutineContext current_coro = {0};
+
+static void coro_add_allowed_var(const char* name) {
+    if (!name || !name[0]) return;
+    for (int i = 0; i < current_coro.count; i++) {
+        if (strcmp(current_coro.names[i], name) == 0) return;
+    }
+    if (current_coro.count < 256) {
+        strncpy(current_coro.names[current_coro.count++], name, 63);
+    }
+}
+
+static int coro_is_var_allowed(const char* name) {
+    for (int i = 0; i < current_coro.count; i++) {
+        if (strcmp(current_coro.names[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+// Рекурсивно достаем базу: a.b.c -> a, ptr[i] -> ptr, *ptr -> ptr
+static const char* get_base_ident(Node* lhs) {
+    if (!lhs) return NULL;
+    if (lhs->type == NODE_IDENT || lhs->type == NODE_VAR) return lhs->str;
+    if ((lhs->type == NODE_MEMBER_DOT || lhs->type == NODE_MEMBER_ARROW ||
+         lhs->type == NODE_INDEX || lhs->type == NODE_ADDR_INDEX) &&
+        lhs->childs && lhs->childs->size > 0) {
+        return get_base_ident(&lhs->childs->data[0]);
+    }
+    if (lhs->type == NODE_DEREF || lhs->type == NODE_ADDR) {
+        if (lhs->childs && lhs->childs->size > 0) return get_base_ident(&lhs->childs->data[0]);
+    }
+    return NULL;
+}
+
+static void validate_coroutine_memory(vector_node *nodes) {
+    if (!nodes) return;
+    for (size_t i = 0; i < nodes->size; i++) {
+        Node *n = &nodes->data[i];
+
+        // 1. Вход в корутину
+        if (n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) {
+            current_coro.is_active = 1;
+            current_coro.count = 0;
+
+            // Добавляем параметры (обычно они в childs[2])
+            if (n->childs->size >= 3 && n->childs->data[2].type == NODE_PARAMS) {
+                Node *params = &n->childs->data[2];
+                for (size_t p = 0; p < params->childs->size; p++) {
+                    Node *param = &params->childs->data[p];
+                    if (param->childs && param->childs->size >= 2 && param->childs->data[1].str) {
+                        coro_add_allowed_var(param->childs->data[1].str);
+                    }
+                }
+            }
+
+            // Обходим тело (childs[3])
+            if (n->childs->size >= 4 && n->childs->data[3].type == NODE_SCOPE) {
+                validate_coroutine_memory(n->childs->data[3].childs);
+            }
+
+            current_coro.is_active = 0;
+            continue; // Тело уже обошли, идем к следующему узлу
+        }
+
+        if (current_coro.is_active) {
+            // 2. Регистрируем локальные переменные
+            if (n->type == NODE_VAR_DEF || n->type == NODE_CHANNEL_VAR_DEF) {
+                if (n->childs && n->childs->size >= 2 && n->childs->data[1].str) {
+                    coro_add_allowed_var(n->childs->data[1].str);
+                }
+            }
+
+            // 3. Проверяем запись
+            if (n->type == NODE_ASSIGN || n->type == NODE_MEMBER_ASSIGN ||
+                n->type == NODE_INDEX_ASSIGN || n->type == NODE_PTR_ASSIGN ||
+                n->type == NODE_MEMBER_INDEX_ASSIGN) {
+                
+                if (n->childs && n->childs->size > 0) {
+                    Node *lhs = &n->childs->data[0];
+                    const char* base_name = get_base_ident(lhs);
+                    
+                    if (base_name && !coro_is_var_allowed(base_name)) {
+                        fprintf(stderr, "\n[Compile Error]: Memory safety violation in coroutine.\n"
+                                        "Attempt to write to '%s'. Coroutines can only write to their own arguments, "
+                                        "local variables, or variables explicitly marked as 'channel'.\n", base_name);
+                        exit(1);
+                    }
+                }
+            }
+        }
+
+        // Рекурсивный обход для вложенных скоупов (if, while, for)
+        if (n->childs) {
+            validate_coroutine_memory(n->childs);
+        }
     }
 }
 
@@ -1758,16 +1893,14 @@ void pregen(vector_node *nodes) {
     idx_var_reset();
     arr_size_reset();
 
-    /* Собираем размеры массивов до любых трансформаций */
+    validate_coroutine_memory(nodes);
     collect_array_sizes(nodes);
 
-    /* Инжектируем _idx_N переменные и проверки границ */
     {
         int s = 0, e = (int)nodes->size;
         inject_idx_vars(nodes, &s, &e, nodes, nodes, "");
     }
 
-    /* Эмитим глобальные определения _idx_N в начало модуля */
     emit_idx_global_defs(nodes);
 
     pregen_inline_new(nodes, 0, (int)nodes->size);
@@ -1779,30 +1912,66 @@ void pregen(vector_node *nodes) {
         patch_ownership_vardefs(nodes, 0, (int)nodes->size);
     }
 
+    /* Pass 1: собираем все алиасы и граф вызовов (без вставки delete) */
     for (int j = 0; j < (int)nodes->size; j++) {
         Node *n = &nodes->data[j];
-        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF) &&
+        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+             n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) &&
             n->childs->size >= 4) {
             Node *scope       = &n->childs->data[3];
             const char *fname = n->childs->data[1].str ? n->childs->data[1].str : "";
             Node *params      = (n->childs->size >= 3 && n->childs->data[2].type == NODE_PARAMS) ? &n->childs->data[2] : NULL;
-            if (scope->type == NODE_SCOPE)
-                pregen_scope(scope->childs, 0, (int)scope->childs->size, fname, params);
+            if (scope->type == NODE_SCOPE) {
+                int is_void = (n->childs->data[0].str && strstr(n->childs->data[0].str, "void") != NULL);
+                pregen_scope(scope->childs, 0, (int)scope->childs->size, fname, params, 0, is_void); /* insert_deletes = 0 */
+            }
         } else if (n->type == NODE_STRUCT_DEF) {
             for (unsigned long long k = 0; k < n->childs->size; k++) {
                 Node *child = &n->childs->data[k];
-                if ((child->type == NODE_FUNC_DEF || child->type == NODE_STATIC_FUNC_DEF) && child->childs->size >= 4) {
+                if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+                     n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) && child->childs->size >= 4) {
                     Node *scope       = &child->childs->data[3];
                     const char *fname = child->childs->data[1].str ? child->childs->data[1].str : "";
                     Node *params      = (child->childs->size >= 3 && child->childs->data[2].type == NODE_PARAMS) ? &child->childs->data[2] : NULL;
-                    if (scope->type == NODE_SCOPE)
-                        pregen_scope(scope->childs, 0, (int)scope->childs->size, fname, params);
+                    if (scope->type == NODE_SCOPE) {
+                        int is_void = (n->childs->data[0].str && strstr(n->childs->data[0].str, "void") != NULL);
+                        pregen_scope(scope->childs, 0, (int)scope->childs->size, fname, params, 0, is_void); /* insert_deletes = 0 */
+                    }
                 }
             }
         }
     }
 
-    /* Дамп индекса функций */
+    /* Pass 2: вставляем delete, используя полную картину */
+    for (int j = 0; j < (int)nodes->size; j++) {
+        Node *n = &nodes->data[j];
+        if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+             n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) &&
+            n->childs->size >= 4) {
+            Node *scope       = &n->childs->data[3];
+            const char *fname = n->childs->data[1].str ? n->childs->data[1].str : "";
+            Node *params      = (n->childs->size >= 3 && n->childs->data[2].type == NODE_PARAMS) ? &n->childs->data[2] : NULL;
+            if (scope->type == NODE_SCOPE) {
+                int is_void = (n->childs->data[0].str && strstr(n->childs->data[0].str, "void") != NULL);
+                pregen_scope(scope->childs, 0, (int)scope->childs->size, fname, params, 1, is_void); /* insert_deletes = 1 */
+            }
+        } else if (n->type == NODE_STRUCT_DEF) {
+            for (unsigned long long k = 0; k < n->childs->size; k++) {
+                Node *child = &n->childs->data[k];
+                if ((n->type == NODE_FUNC_DEF || n->type == NODE_STATIC_FUNC_DEF || 
+                     n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) && child->childs->size >= 4) {
+                    Node *scope       = &child->childs->data[3];
+                    const char *fname = child->childs->data[1].str ? child->childs->data[1].str : "";
+                    Node *params      = (child->childs->size >= 3 && child->childs->data[2].type == NODE_PARAMS) ? &child->childs->data[2] : NULL;
+                    if (scope->type == NODE_SCOPE) {
+                        int is_void = (n->childs->data[0].str && strstr(n->childs->data[0].str, "void") != NULL);
+                        pregen_scope(scope->childs, 0, (int)scope->childs->size, fname, params, 1, is_void); /* insert_deletes = 1 */
+                    }
+                }
+            }
+        }
+    }
+
     for (int i = 0; i < g_func_index_count; i++) {
         FuncRecord *r = &g_func_index[i];
         fprintf(stderr, "pregen[IDX]: func[%d]='%s' params=%d%s\n",

@@ -1,4 +1,4 @@
-# FLAME LANGUAGE
+# FLAME LANGUAGE (DEPRECATED, UPDATE COMING SOON)
 Flame is a natively compiled systems programming language.
 Its goal is to provide the power and perfomance of the C lnaguage, but in acleaner and simpler way.
 In the feuture, exception policies, OOP, native ownership and mamory safety will be implemented.

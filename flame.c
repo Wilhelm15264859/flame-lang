@@ -13,7 +13,6 @@
 #include <libgen.h>
 
 #define MAX_IMPORTED_MODULES 64
-#define version "1.3"
 
 OverloadEntry* global_modules_overloads[MAX_IMPORTED_MODULES];
 int global_modules_counts[MAX_IMPORTED_MODULES];
@@ -125,7 +124,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (strcmp(argv[1], "-v") == 0) {
-        printf("Flame language\n\t--%s\n", version);
+        printf("Flame language\n\t--%s\n", VERSION);
         return 0;
     }
 
@@ -167,6 +166,7 @@ int main(int argc, char *argv[]) {
                     if (strcmp(op, "O3") == 0) op = "default<O3>";
                     if (strcmp(op, "O2") == 0) op = "default<O2>";
                     if (strcmp(op, "O1") == 0) op = "default<O1>";
+                    if (strcmp(op, "O0") == 0) op = "default<O0>";
                     strncat(pass_list, op, sizeof(pass_list) - strlen(pass_list) - 1);
                     first_pass = 0;
                     i++;

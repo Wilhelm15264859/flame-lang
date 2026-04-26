@@ -40,6 +40,43 @@ static OverloadEntry* find_extern_overload(const char* mangled_name) {
     return NULL; // В импортированных модулях такой функции нет
 }
 
+/* ═══════════════════════════════════════════════════════════════════
+ * LLVM Coroutine Intrinsics
+ * ═══════════════════════════════════════════════════════════════════ */
+
+static LLVMValueRef get_coro_id(LLVMModuleRef M, LLVMContextRef ctx) {
+    LLVMValueRef f = LLVMGetNamedFunction(M, "llvm.coro.id");
+    if (!f) {
+        LLVMTypeRef params[] = { LLVMInt32TypeInContext(ctx), LLVMPointerType(LLVMInt8TypeInContext(ctx), 0), 
+                                 LLVMPointerType(LLVMInt8TypeInContext(ctx), 0), LLVMPointerType(LLVMInt8TypeInContext(ctx), 0) };
+        LLVMTypeRef ty = LLVMFunctionType(LLVMTokenTypeInContext(ctx), params, 4, 0);
+        f = LLVMAddFunction(M, "llvm.coro.id", ty);
+    }
+    return f;
+}
+
+static LLVMValueRef get_coro_size(LLVMModuleRef M, LLVMContextRef ctx) {
+    LLVMValueRef f = LLVMGetNamedFunction(M, "llvm.coro.size.i64");
+    if (!f) {
+        LLVMTypeRef ty = LLVMFunctionType(LLVMInt64TypeInContext(ctx), NULL, 0, 0);
+        f = LLVMAddFunction(M, "llvm.coro.size.i64", ty);
+    }
+    return f;
+}
+
+static LLVMValueRef get_coro_begin(LLVMModuleRef M, LLVMContextRef ctx) {
+    LLVMValueRef f = LLVMGetNamedFunction(M, "llvm.coro.begin");
+    if (!f) {
+        LLVMTypeRef params[] = { LLVMTokenTypeInContext(ctx), LLVMPointerType(LLVMInt8TypeInContext(ctx), 0) };
+        LLVMTypeRef ty = LLVMFunctionType(LLVMPointerType(LLVMInt8TypeInContext(ctx), 0), params, 2, 0);
+        f = LLVMAddFunction(M, "llvm.coro.begin", ty);
+    }
+    return f;
+}
+
+// Глобальная переменная для хранения текущего хэндла корутины (coro_begin)
+static LLVMValueRef current_coro_handle = NULL;
+
 typedef struct {
   char name[64];
   LLVMTypeRef type;
@@ -95,6 +132,8 @@ static void typedef_push(const char *alias, const char *original) {
     }
     strncpy(typedef_table[typedef_count].alias,    alias,    63);
     strncpy(typedef_table[typedef_count].original, original, 63);
+    typedef_table[typedef_count].alias[63] = '\0';
+    typedef_table[typedef_count].original[63] = '\0';
     typedef_count++;
 }
 
@@ -115,6 +154,7 @@ static void type_push(const char *name, LLVMTypeRef type) {
     }
   }
   strncpy(type_table[type_count].name, name, 63);
+  type_table[typedef_count].name[63] = '\0';
   type_table[type_count].type = type;
   type_count++;
 }
@@ -214,6 +254,11 @@ static LLVMValueRef codegen_type_literal(Node *n) {
   return gvar;
 }
 
+static int is_type_unsigned(const char *name) {
+    return strcmp(name, "uint") == 0 || strcmp(name, "ushort") == 0 ||
+           strcmp(name, "ulong") == 0 || strcmp(name, "uchar") == 0;
+}
+
 typedef struct {
   char name[64];
   LLVMValueRef value;
@@ -222,6 +267,9 @@ typedef struct {
   LLVMTypeRef fn_type;
   int is_func;
   int is_vla;
+  int is_unsigned;
+  /* 1 = зависимая ссылка: value — это alloca(ptr*), при чтении делаем двойной load */
+  int is_ref;
 } Symbol;
 
 static Symbol *sym_table;
@@ -266,13 +314,13 @@ static LLVMTypeRef llvm_type_from_str(const char *s) {
   if (strchr(s, '*')) {
     return LLVMPointerTypeInContext(ctx, 0);
   }
-  if (strcmp(s, "int") == 0)
+  if (strcmp(s, "int") == 0 || strcmp(s, "uint") == 0)
     return LLVMInt32TypeInContext(ctx);
-  if (strcmp(s, "short") == 0)
+  if (strcmp(s, "short") == 0 || strcmp(s, "ushort") == 0)
     return LLVMInt16TypeInContext(ctx);
-  if (strcmp(s, "long") == 0)
+  if (strcmp(s, "long") == 0 || strcmp(s, "ulong") == 0)
     return LLVMInt64TypeInContext(ctx);
-  if (strcmp(s, "char") == 0)
+  if (strcmp(s, "char") == 0 || strcmp(s, "uchar") == 0)
     return LLVMInt8TypeInContext(ctx);
   if (strcmp(s, "float") == 0)
     return LLVMFloatTypeInContext(ctx);
@@ -329,9 +377,12 @@ static int type_is_float(LLVMTypeRef t) {
 
 /* Returns 1 if name is a primitive (non-struct) type */
 static int is_primitive_type(const char *name) {
+  if (strchr(name, '*')) return 1;
   return strcmp(name, "int") == 0 || strcmp(name, "short") == 0 ||
          strcmp(name, "long") == 0 || strcmp(name, "char") == 0 ||
-         strcmp(name, "float") == 0 || strcmp(name, "double") == 0;
+         strcmp(name, "float") == 0 || strcmp(name, "double") == 0 ||
+         strcmp(name, "uint") == 0 || strcmp(name, "ushort") == 0 ||
+         strcmp(name, "uchar") == 0 || strcmp(name, "ulong") == 0;
 }
 
 static LLVMValueRef coerce_to(LLVMValueRef val, LLVMTypeRef target) {
@@ -403,12 +454,31 @@ static LLVMValueRef codegen_var(Node *n) {
   if (s->is_vla) {
     return s->value;
   }
+  /* Зависимая ссылка (b = c без &):
+   * value — это alloca(ptr_type*), сначала грузим указатель, потом значение */
+  if (s->is_ref) {
+    LLVMTypeRef ptr_type = LLVMPointerTypeInContext(ctx, 0);
+    LLVMValueRef inner_ptr = LLVMBuildLoad2(builder, ptr_type, s->value, "ref_ptr");
+    return LLVMBuildLoad2(builder, s->type, inner_ptr, n->str);
+  }
   return LLVMBuildLoad2(builder, s->type, s->value, n->str);
 }
 
 static LLVMValueRef codegen_binop(Node *n) {
   if (n->childs->size < 2)
     return NULL;
+
+  int left_is_unsigned = 0, right_is_unsigned = 0;
+  if (n->childs->data[0].type == NODE_VAR) {
+    Symbol *ls = sym_lookup(n->childs->data[0].str);
+    if (ls) left_is_unsigned = ls->is_unsigned;
+  }
+  if (n->childs->data[1].type == NODE_VAR) {
+    Symbol *rs = sym_lookup(n->childs->data[1].str);
+    if (rs) right_is_unsigned = rs->is_unsigned;
+  }
+  int is_unsigned_op = left_is_unsigned || right_is_unsigned;
+
   LLVMValueRef left = codegen_node(&n->childs->data[0]);
   LLVMValueRef right = codegen_node(&n->childs->data[1]);
   if (!left || !right)
@@ -463,9 +533,9 @@ static LLVMValueRef codegen_binop(Node *n) {
         unsigned lb = LLVMGetIntTypeWidth(lt);
         unsigned rb = LLVMGetIntTypeWidth(rt);
         if (lb < rb)
-          left = LLVMBuildZExt(builder, left, rt, "zext");
+          left = is_unsigned_op ? LLVMBuildZExt(builder, left, rt, "zext") : LLVMBuildSExt(builder, left, rt, "sext");
         else if (rb < lb)
-          right = LLVMBuildZExt(builder, right, lt, "zext");
+          right = is_unsigned_op ? LLVMBuildZExt(builder, right, lt, "zext") : LLVMBuildSExt(builder, right, lt, "sext");
       } else if (type_is_float(lt) && rk == LLVMIntegerTypeKind) {
         right = LLVMBuildSIToFP(builder, right, lt, "si2fp");
       } else if (lk == LLVMIntegerTypeKind && type_is_float(rt)) {
@@ -492,9 +562,9 @@ static LLVMValueRef codegen_binop(Node *n) {
                  : LLVMBuildMul(builder, left, right, "mul");
   if (strcmp(op, "/") == 0)
     return is_fp ? LLVMBuildFDiv(builder, left, right, "fdiv")
-                 : LLVMBuildSDiv(builder, left, right, "div");
+                 : (is_unsigned_op ? LLVMBuildUDiv(builder, left, right, "udiv") : LLVMBuildSDiv(builder, left, right, "sdiv"));
   if (strcmp(op, "%") == 0)
-    return LLVMBuildSRem(builder, left, right, "rem");
+    return is_unsigned_op ? LLVMBuildURem(builder, left, right, "urem") : LLVMBuildSRem(builder, left, right, "srem");
   if (left_is_ptr && right_is_ptr) {
     LLVMValueRef cmp = NULL;
     if (strcmp(op, "==") == 0)
@@ -517,16 +587,16 @@ static LLVMValueRef codegen_binop(Node *n) {
                 : LLVMBuildICmp(builder, LLVMIntNE, left, right, "ne");
   else if (strcmp(op, "<") == 0)
     cmp = is_fp ? LLVMBuildFCmp(builder, LLVMRealOLT, left, right, "lt")
-                : LLVMBuildICmp(builder, LLVMIntSLT, left, right, "lt");
+                : LLVMBuildICmp(builder, is_unsigned_op ? LLVMIntULT : LLVMIntSLT, left, right, "lt");
   else if (strcmp(op, ">") == 0)
     cmp = is_fp ? LLVMBuildFCmp(builder, LLVMRealOGT, left, right, "gt")
-                : LLVMBuildICmp(builder, LLVMIntSGT, left, right, "gt");
+                : LLVMBuildICmp(builder, is_unsigned_op ? LLVMIntUGT : LLVMIntSGT, left, right, "gt");
   else if (strcmp(op, "<=") == 0)
     cmp = is_fp ? LLVMBuildFCmp(builder, LLVMRealOLE, left, right, "le")
-                : LLVMBuildICmp(builder, LLVMIntSLE, left, right, "le");
+                : LLVMBuildICmp(builder, is_unsigned_op ? LLVMIntULE : LLVMIntSLE, left, right, "le");
   else if (strcmp(op, ">=") == 0)
     cmp = is_fp ? LLVMBuildFCmp(builder, LLVMRealOGE, left, right, "ge")
-                : LLVMBuildICmp(builder, LLVMIntSGE, left, right, "ge");
+                : LLVMBuildICmp(builder, is_unsigned_op ? LLVMIntUGE : LLVMIntSGE, left, right, "ge");
   else if (strcmp(op, "&&") == 0)
     cmp = LLVMBuildAnd(builder, left, right, "and");
   else if (strcmp(op, "||") == 0)
@@ -551,6 +621,84 @@ static LLVMValueRef codegen_binop(Node *n) {
 static LLVMValueRef codegen_unop(Node *n) {
   if (n->childs->size < 1)
     return NULL;
+
+  /* ── Слабая ссылка / взятие адреса: &expr ──────────────────────────────
+   * Возвращает указатель на l-value операнда, не загружая значение.
+   *   &var        → alloca переменной
+   *   &obj.field  → GEP в стековом объекте
+   *   &obj->field → GEP через указатель
+   *   &func()     → alloca временного, куда записывается результат вызова
+   *   &new() T    → то же самое
+   * ─────────────────────────────────────────────────────────────────────── */
+  if (strcmp(n->str, "&") == 0) {
+    Node *inner = &n->childs->data[0];
+
+    /* &simpleVar */
+    if (inner->type == NODE_VAR) {
+      Symbol *s = sym_lookup(inner->str);
+      if (!s) {
+        fprintf(stderr, "codegen error: undefined variable '%s'\n", inner->str);
+        exit(1);
+      }
+      /* Если источник is_ref — нужен реальный адрес, а не ptr-of-ptr */
+      if (s->is_ref)
+        return LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), s->value, "ref_addr");
+      return s->value;
+    }
+
+    /* &obj.field */
+    if (inner->type == NODE_MEMBER_DOT) {
+      Node *obj = &inner->childs->data[0];
+      Symbol *s = sym_lookup(obj->str);
+      if (!s) { fprintf(stderr, "codegen error: '%s' not found\n", obj->str); exit(1); }
+      LLVMTypeRef st = s->type;
+      if (LLVMGetTypeKind(st) != LLVMStructTypeKind) {
+        fprintf(stderr, "codegen error: '%s' is not a struct\n", obj->str); exit(1);
+      }
+      int fi = get_field_index(st, inner->str);
+      if (fi < 0) { fprintf(stderr, "codegen error: field '%s' not found\n", inner->str); exit(1); }
+      LLVMValueRef idx[] = {
+        LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
+        LLVMConstInt(LLVMInt32TypeInContext(ctx), fi, 0)
+      };
+      return LLVMBuildGEP2(builder, st, s->value, idx, 2, "field_addr");
+    }
+
+    /* &obj->field */
+    if (inner->type == NODE_MEMBER_ARROW) {
+      Node *obj = &inner->childs->data[0];
+      Symbol *s = sym_lookup(obj->str);
+      if (!s) { fprintf(stderr, "codegen error: '%s' not found\n", obj->str); exit(1); }
+      LLVMValueRef ptr = LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), s->value, "ptr");
+      LLVMTypeRef st = s->elem_type;
+      if (!st || LLVMGetTypeKind(st) != LLVMStructTypeKind) {
+        fprintf(stderr, "codegen error: '%s' is not a pointer to struct\n", obj->str); exit(1);
+      }
+      int fi = get_field_index(st, inner->str);
+      if (fi < 0) { fprintf(stderr, "codegen error: field '%s' not found\n", inner->str); exit(1); }
+      LLVMValueRef idx[] = {
+        LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
+        LLVMConstInt(LLVMInt32TypeInContext(ctx), fi, 0)
+      };
+      return LLVMBuildGEP2(builder, st, ptr, idx, 2, "field_addr");
+    }
+
+    /* &func() или &new() T — вычисляем, кладём во временный alloca */
+    if (inner->type == NODE_FUNC_CALL || inner->type == NODE_NEW ||
+        inner->type == NODE_ASYNC_CALL || inner->type == NODE_AWAIT_CALL) {
+      LLVMValueRef val = codegen_node(inner);
+      if (!val) return NULL;
+      LLVMTypeRef vt = LLVMTypeOf(val);
+      LLVMValueRef tmp = LLVMBuildAlloca(builder, vt, "tmp_addr");
+      LLVMBuildStore(builder, val, tmp);
+      return tmp;
+    }
+
+    fprintf(stderr, "codegen error: cannot take address of this expression\n");
+    exit(1);
+    return NULL;
+  }
+
   LLVMValueRef val = codegen_node(&n->childs->data[0]);
   if (!val)
     return NULL;
@@ -606,6 +754,7 @@ static LLVMValueRef codegen_index(Node *n) {
 
   if (arr_node->type == NODE_MEMBER_ARROW ||
       arr_node->type == NODE_MEMBER_DOT) {
+    if (arr_node->childs->size < 1) return NULL;
     Node *var_node = &arr_node->childs->data[0];
     Symbol *s = sym_lookup(var_node->str);
     if (!s) {
@@ -776,6 +925,7 @@ static LLVMValueRef codegen_array_def(Node *n) {
       sym_table[*sym_count - 1].elem_type = fn_ptr_type;
       sym_table[*sym_count - 1].fn_type = fn_sig;
       sym_table[*sym_count - 1].is_vla = 0;
+      sym_table[*sym_count - 1].is_unsigned = is_type_unsigned(type_str);
       return ptr;
     }
 
@@ -790,6 +940,7 @@ static LLVMValueRef codegen_array_def(Node *n) {
     sym_table[*sym_count - 1].elem_type = fn_ptr_type;
     sym_table[*sym_count - 1].fn_type = fn_sig;
     sym_table[*sym_count - 1].is_vla = 1;
+    sym_table[*sym_count - 1].is_unsigned = is_type_unsigned(type_str);
     return ptr;
   }
 
@@ -804,6 +955,7 @@ static LLVMValueRef codegen_array_def(Node *n) {
     sym_push(name, ptr, arr_type, 0);
     sym_table[*sym_count - 1].elem_type = elem_type;
     sym_table[*sym_count - 1].is_vla = 0;
+    sym_table[*sym_count - 1].is_unsigned = is_type_unsigned(type_str);
     return ptr;
   }
 
@@ -818,6 +970,7 @@ static LLVMValueRef codegen_array_def(Node *n) {
   sym_push(name, ptr, ptr_type, 0);
   sym_table[*sym_count - 1].elem_type = elem_type;
   sym_table[*sym_count - 1].is_vla = 1;
+  sym_table[*sym_count - 1].is_unsigned = is_type_unsigned(type_str);
   return ptr;
 }
 
@@ -835,6 +988,10 @@ static LLVMValueRef codegen_func_call(Node *n) {
 
     LLVMTypeRef param_types_arr[64];
     unsigned param_count = LLVMCountParamTypes(s->fn_type);
+    if (param_count > 64) {
+      fprintf(stderr, "codegen error: function '%s' has too many parameters (>64)\n", fname);
+      exit(1);
+    }
     if (param_count > 0 && param_count <= 64)
       LLVMGetParamTypes(s->fn_type, param_types_arr);
 
@@ -903,6 +1060,10 @@ static LLVMValueRef codegen_func_call(Node *n) {
 
   LLVMTypeRef param_types_arr[64];
   unsigned param_types_count = LLVMCountParamTypes(ftype);
+  if (param_types_count > 64) {
+    fprintf(stderr, "codegen error: function '%s' has too many parameters (>64)\n", fname);
+    exit(1);
+  }
   if (param_types_count > 0 && param_types_count <= 64)
     LLVMGetParamTypes(ftype, param_types_arr);
 
@@ -1088,6 +1249,7 @@ static LLVMValueRef codegen_deref(Node *n) {
   return LLVMBuildLoad2(builder, LLVMInt32TypeInContext(ctx), ptr, "deref_gen");
 }
 
+
 static LLVMValueRef codegen_func_def(Node *n) {
   if (n->childs->size < 4)
     return NULL;
@@ -1097,6 +1259,10 @@ static LLVMValueRef codegen_func_def(Node *n) {
   Node *params = &n->childs->data[2];
   Node *scope = &n->childs->data[3];
   LLVMTypeRef ret_type = llvm_type_from_str(ret_str);
+
+  if (n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) {
+      ret_type = LLVMPointerTypeInContext(ctx, 0); 
+  }
 
   int is_extern_c = (strncmp(fname, "__extern_c__", 12) == 0);
   char real_name[128];
@@ -1146,6 +1312,28 @@ static LLVMValueRef codegen_func_def(Node *n) {
   LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(ctx, func, "entry");
   LLVMPositionBuilderAtEnd(builder, entry);
 
+  if (n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) {
+      LLVMValueRef null_ptr = LLVMConstNull(LLVMPointerTypeInContext(ctx, 0));
+      LLVMValueRef zero_i32 = LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0);
+      
+      LLVMValueRef id_args[] = { zero_i32, null_ptr, null_ptr, null_ptr };
+      LLVMValueRef coro_id = LLVMBuildCall2(builder, LLVMGlobalGetValueType(get_coro_id(mod, ctx)), 
+                                            get_coro_id(mod, ctx), id_args, 4, "coro_id");
+
+      LLVMValueRef coro_size = LLVMBuildCall2(builder, LLVMGlobalGetValueType(get_coro_size(mod, ctx)), 
+                                              get_coro_size(mod, ctx), NULL, 0, "coro_size");
+
+      LLVMValueRef malloc_fn = LLVMGetNamedFunction(mod, "malloc");
+      LLVMValueRef allocated = LLVMBuildCall2(builder, LLVMGlobalGetValueType(malloc_fn), 
+                                              malloc_fn, &coro_size, 1, "coro_alloc");
+
+      LLVMValueRef begin_args[] = { coro_id, allocated };
+      current_coro_handle = LLVMBuildCall2(builder, LLVMGlobalGetValueType(get_coro_begin(mod, ctx)), 
+                                           get_coro_begin(mod, ctx), begin_args, 2, "coro_hdl");
+  } else {
+      current_coro_handle = NULL;
+  }
+
   int cp = sym_checkpoint();
 
   if (params->type == NODE_PARAMS) {
@@ -1186,6 +1374,7 @@ static LLVMValueRef codegen_func_def(Node *n) {
         }
         sym_table[*sym_count].is_func = 0;
         sym_table[*sym_count].is_vla = 0;
+        sym_table[*sym_count].is_unsigned = is_type_unsigned(ptype_str);
 
         LLVMTypeRef fnsig = parse_ftype_str(ptype_str);
         sym_table[*sym_count].fn_type = fnsig;
@@ -1207,17 +1396,16 @@ static LLVMValueRef codegen_func_def(Node *n) {
     if (LLVMGetTypeKind(ret_type) == LLVMVoidTypeKind)
       LLVMBuildRetVoid(builder);
     else
-      LLVMBuildRet(builder, LLVMConstInt(ret_type, 0, 0));
+      LLVMBuildRet(builder, LLVMConstNull(ret_type)); // ИСПОЛЬЗУЕМ LLVMConstNull
   }
 
   LLVMBasicBlockRef last_bb = LLVMGetLastBasicBlock(func);
   if (last_bb && !LLVMGetBasicBlockTerminator(last_bb)) {
     LLVMPositionBuilderAtEnd(builder, last_bb);
-    if (LLVMGetTypeKind(LLVMGetReturnType(LLVMGlobalGetValueType(func))) ==
-        LLVMVoidTypeKind)
+    if (LLVMGetTypeKind(LLVMGetReturnType(LLVMGlobalGetValueType(func))) == LLVMVoidTypeKind)
       LLVMBuildRetVoid(builder);
     else
-      LLVMBuildUnreachable(builder);
+      LLVMBuildRet(builder, LLVMConstNull(LLVMGetReturnType(LLVMGlobalGetValueType(func)))); // ИСПОЛЬЗУЕМ LLVMConstNull
   }
 
   sym_restore(cp);
@@ -1229,22 +1417,81 @@ static LLVMValueRef codegen_func_def(Node *n) {
  * Helpers: check if a NODE_DELETE inside a scope deletes a given field
  * via self->field  (NODE_MEMBER_ARROW with obj "self").
  * ────────────────────────────────────────────────────────────────────────── */
-static int scope_has_delete_of_field(Node *scope, const char *field_name) {
-  if (!scope) return 0;
+/* ──────────────────────────────────────────────────────────────────────────
+ * Helpers: check if a NODE_DELETE inside a scope deletes a given field
+ * via self->field  (NODE_MEMBER_ARROW with obj "self").
+ *
+ * Also detects the alias pattern:
+ *   TYPE* tmp = self->field;   (NODE_VAR_DEF with init = NODE_MEMBER_ARROW)
+ *   delete tmp;                (NODE_DELETE with NODE_VAR whose name == tmp)
+ *
+ * We collect names that are known to be aliases of self->field_name and check
+ * whether any NODE_DELETE targets one of those aliases.
+ * ────────────────────────────────────────────────────────────────────────── */
+
+/* Collect all local variable names that are assigned from self->field_name
+ * anywhere in the scope tree. Fills alias_names[]/alias_count (max 16). */
+static void collect_field_aliases(Node *scope, const char *field_name,
+                                  char alias_names[16][64], int *alias_count) {
+  if (!scope || !scope->childs) return;
   for (unsigned long long i = 0; i < scope->childs->size; i++) {
     Node *ch = &scope->childs->data[i];
-    if (ch->type == NODE_DELETE && ch->childs->size >= 2) {
-      Node *var_node = &ch->childs->data[1];
-      /* delete self->field */
-      if (var_node->type == NODE_MEMBER_ARROW &&
-          var_node->childs->size >= 1 &&
-          strcmp(var_node->str, field_name) == 0) {
-        return 1;
+    /* NODE_VAR_DEF: type name = self->field  */
+    if (ch->type == NODE_VAR_DEF && ch->childs && ch->childs->size >= 3) {
+      Node *init = &ch->childs->data[2];
+      if ((init->type == NODE_MEMBER_ARROW || init->type == NODE_MEMBER_DOT) &&
+          init->str && strcmp(init->str, field_name) == 0 &&
+          ch->childs->data[1].str && *alias_count < 16) {
+        strncpy(alias_names[(*alias_count)++], ch->childs->data[1].str, 63);
       }
     }
-    /* recurse into scopes / if / while / for / do-while bodies */
-    if (scope_has_delete_of_field(ch, field_name))
-      return 1;
+    /* NODE_ASSIGN: tmp = self->field  */
+    if (ch->type == NODE_ASSIGN && ch->childs && ch->childs->size >= 3) {
+      Node *rhs = &ch->childs->data[2];
+      if ((rhs->type == NODE_MEMBER_ARROW || rhs->type == NODE_MEMBER_DOT) &&
+          rhs->str && strcmp(rhs->str, field_name) == 0 &&
+          ch->childs->data[0].str && *alias_count < 16) {
+        strncpy(alias_names[(*alias_count)++], ch->childs->data[0].str, 63);
+      }
+    }
+    /* Recurse (but not into nested function definitions) */
+    if (ch->type != NODE_FUNC_DEF && ch->type != NODE_STATIC_FUNC_DEF)
+      collect_field_aliases(ch, field_name, alias_names, alias_count);
+  }
+}
+
+static int scope_has_delete_of_field(Node *scope, const char *field_name) {
+  if (!scope) return 0;
+
+  /* Collect local aliases of self->field_name in this scope tree */
+  char alias_names[16][64];
+  int alias_count = 0;
+  collect_field_aliases(scope, field_name, alias_names, &alias_count);
+
+  /* Recursive check */
+  for (unsigned long long i = 0; i < scope->childs->size; i++) {
+    Node *ch = &scope->childs->data[i];
+    if (ch->type == NODE_DELETE && ch->childs && ch->childs->size >= 2) {
+      Node *var_node = &ch->childs->data[1];
+      /* delete self->field  (direct) */
+      if ((var_node->type == NODE_MEMBER_ARROW ||
+           var_node->type == NODE_MEMBER_DOT) &&
+          var_node->str && strcmp(var_node->str, field_name) == 0) {
+        return 1;
+      }
+      /* delete tmp  where tmp is a known alias of self->field */
+      if (var_node->type == NODE_VAR && var_node->str) {
+        for (int a = 0; a < alias_count; a++) {
+          if (strcmp(var_node->str, alias_names[a]) == 0)
+            return 1;
+        }
+      }
+    }
+    /* Recurse into nested scopes (but not function defs) */
+    if (ch->type != NODE_FUNC_DEF && ch->type != NODE_STATIC_FUNC_DEF) {
+      if (scope_has_delete_of_field(ch, field_name))
+        return 1;
+    }
   }
   return 0;
 }
@@ -1461,17 +1708,35 @@ static void codegen_auto_delete_fields(const char *class_name,
     return;
 
   /* The `self` pointer is param 0 of the existing dtor.
-   * Find the alloca named "self" in the entry block. */
+   * Find its alloca in the entry block: it's the first alloca whose stored
+   * value is param 0 (the store immediately follows the alloca). We do NOT
+   * rely on the alloca being named "self" — the user may name it anything. */
   LLVMValueRef self_alloca = NULL;
   {
+    LLVMValueRef param0 = LLVMGetParam(existing_dtor, 0);
     LLVMBasicBlockRef entry_bb = LLVMGetFirstBasicBlock(existing_dtor);
     if (entry_bb) {
       LLVMValueRef inst = LLVMGetFirstInstruction(entry_bb);
       while (inst) {
-        if (LLVMGetInstructionOpcode(inst) == LLVMAlloca &&
-            strcmp(LLVMGetValueName(inst), "self") == 0) {
-          self_alloca = inst;
-          break;
+        if (LLVMGetInstructionOpcode(inst) == LLVMAlloca) {
+          /* Check whether the very next instruction is a store of param0
+           * into this alloca — that is the canonical pattern emitted by
+           * codegen_func_def for every parameter. */
+          LLVMValueRef next = LLVMGetNextInstruction(inst);
+          if (next && LLVMGetInstructionOpcode(next) == LLVMStore) {
+            /* store param0, alloca */
+            if (LLVMGetOperand(next, 0) == param0 &&
+                LLVMGetOperand(next, 1) == inst) {
+              self_alloca = inst;
+              break;
+            }
+          }
+          /* Fallback: if the alloca is named "self" use it too */
+          if (!self_alloca &&
+              strcmp(LLVMGetValueName(inst), "self") == 0) {
+            self_alloca = inst;
+            /* keep scanning in case the store-based check matches later */
+          }
         }
         inst = LLVMGetNextInstruction(inst);
       }
@@ -1904,6 +2169,7 @@ static LLVMValueRef codegen_var_def(Node *n) {
       sym_table[*sym_count].fn_type = fn_sig;
       sym_table[*sym_count].is_func = 0;
       sym_table[*sym_count].is_vla = 0;
+      sym_table[*sym_count].is_unsigned = is_type_unsigned(type_str);
       (*sym_count)++;
     }
     return ptr;
@@ -1914,56 +2180,95 @@ static LLVMValueRef codegen_var_def(Node *n) {
 
   LLVMBasicBlockRef cur_block = LLVMGetInsertBlock(builder);
   if (cur_block) {
-    LLVMValueRef ptr = LLVMBuildAlloca(builder, lltype, name);
-    if (*sym_count < MAX_SYMS) {
-      strncpy(sym_table[*sym_count].name, name, 63);
-      sym_table[*sym_count].value = ptr;
-      sym_table[*sym_count].type = lltype;
-      sym_table[*sym_count].elem_type = elem_type;
-      sym_table[*sym_count].fn_type = NULL;
-      sym_table[*sym_count].is_func = 0;
-      (*sym_count)++;
-    }
+    LLVMValueRef ptr = NULL;
+    Node *init_node = NULL;
+    
+    /* ── Определяем семантику инициализатора для указателей ──
+     *
+     *  is_dep = 1  →  зависимая ссылка:  int* b = c
+     *                 b хранит адрес alloca c и при чтении делает двойной load.
+     *                 При переприсваивании b = x обновляет хранимый адрес.
+     *
+     *  is_dep = 0  →  слабая / независимая копия:  int* b = &c  /  b = func()  / etc.
+     *                 b — обычная alloca, инициализируется текущим значением RHS.
+     */
+    int is_dep = 0;
+
     if (n->childs->size >= 3 && n->childs->data[2].type != NODE_UNDEF) {
-      if (n->childs->data[2].type == NODE_NEW) {
-        codegen_new(&n->childs->data[2], ptr, elem_type);
-      } else if (n->childs->data[2].type == NODE_INDEX &&
-                 LLVMGetTypeKind(lltype) == LLVMPointerTypeKind) {
-        LLVMValueRef addr = codegen_index_addr(&n->childs->data[2]);
-        if (addr)
-          LLVMBuildStore(builder, addr, ptr);
-      } else {
-        LLVMValueRef init = codegen_node(&n->childs->data[2]);
-        if (init) {
-          init = coerce_to(init, lltype);
-          LLVMBuildStore(builder, init, ptr);
+        init_node = &n->childs->data[2];
+        if (LLVMGetTypeKind(lltype) == LLVMPointerTypeKind) {
+            /* Зависимая ссылка: RHS — простая переменная того же типа указателя
+             * и без оператора &  →  b зеркалит alloca источника */
+            if (init_node->type == NODE_VAR) {
+                Symbol *src = sym_lookup(init_node->str);
+                if (src && src->type == lltype && !src->is_ref) {
+                    is_dep = 1;
+                } else if (src && src->is_ref) {
+                    /* источник сам is_ref — копируем его alloca-of-ptr */
+                    is_dep = 1;
+                }
+            }
+            /* Слабая ссылка: &expr — снимаем & чтобы получить l-value адрес */
+            else if (init_node->type == NODE_UNOP && strcmp(init_node->str, "&") == 0) {
+                /* оставляем init_node как есть — codegen_node(NODE_UNOP &) вернёт ptr */
+                is_dep = 0;
+            }
+            /* Всё остальное (func(), new(), obj->f, ...) — слабая копия */
         }
-      }
-      return ptr;
     }
-  } else {
-    LLVMValueRef global_var = LLVMAddGlobal(mod, lltype, name);
-    if (n->childs->size >= 3 && n->childs->data[2].type != NODE_UNDEF) {
-      LLVMValueRef init = codegen_node(&n->childs->data[2]);
-      if (init && LLVMIsConstant(init))
-        LLVMSetInitializer(global_var, coerce_to(init, lltype));
-      else
-        LLVMSetInitializer(global_var, LLVMConstNull(lltype));
+
+    /* Alloca:
+     *   is_dep=1 → alloca(ptr_to_ptr) чтобы хранить адрес источника
+     *   is_dep=0 → обычная alloca(lltype) */
+    if (is_dep) {
+        LLVMTypeRef ptr_to_ptr = LLVMPointerTypeInContext(ctx, 0);
+        ptr = LLVMBuildAlloca(builder, ptr_to_ptr, name);
     } else {
-      LLVMSetInitializer(global_var, LLVMConstNull(lltype));
+        ptr = LLVMBuildAlloca(builder, lltype, name);
     }
-    if (is_const)
-      LLVMSetGlobalConstant(global_var, 1);
+
     if (*sym_count < MAX_SYMS) {
       strncpy(sym_table[*sym_count].name, name, 63);
-      sym_table[*sym_count].value = global_var;
-      sym_table[*sym_count].type = lltype;
+      sym_table[*sym_count].value    = ptr;
+      sym_table[*sym_count].type     = lltype;
       sym_table[*sym_count].elem_type = elem_type;
-      sym_table[*sym_count].fn_type = NULL;
-      sym_table[*sym_count].is_func = 0;
+      sym_table[*sym_count].fn_type  = NULL;
+      sym_table[*sym_count].is_func  = 0;
+      sym_table[*sym_count].is_vla   = 0;
+      sym_table[*sym_count].is_ref   = is_dep;
+      sym_table[*sym_count].is_unsigned = is_type_unsigned(type_str);
       (*sym_count)++;
     }
-    return global_var;
+
+    if (init_node) {
+      if (is_dep) {
+          /* Зависимая ссылка — сохраняем адрес alloca источника */
+          Symbol *src = sym_lookup(init_node->str);
+          if (src) {
+              /* Если источник тоже is_ref — копируем его ptr-of-ptr значение */
+              LLVMValueRef src_addr = src->is_ref
+                  ? LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), src->value, "ref_src")
+                  : src->value;
+              LLVMBuildStore(builder, src_addr, ptr);
+          }
+      } else {
+          /* Слабая / обычная копия */
+          if (init_node->type == NODE_NEW) {
+              codegen_new(init_node, ptr, elem_type);
+          } else if (init_node->type == NODE_INDEX &&
+                     LLVMGetTypeKind(lltype) == LLVMPointerTypeKind) {
+              LLVMValueRef addr = codegen_index_addr(init_node);
+              if (addr) LLVMBuildStore(builder, addr, ptr);
+          } else {
+              LLVMValueRef init = codegen_node(init_node);
+              if (init) {
+                  init = coerce_to(init, lltype);
+                  LLVMBuildStore(builder, init, ptr);
+              }
+          }
+      }
+    }
+    return ptr;
   }
 
   return NULL;
@@ -2842,6 +3147,9 @@ static LLVMValueRef codegen_new_expr(Node *n) {
   const char *class_name = n->str;
   LLVMTypeRef elem_type = type_lookup(class_name);
   if (!elem_type) {
+      elem_type = llvm_type_from_str(class_name);
+  }
+  if (!elem_type) {
     fprintf(stderr, "codegen error: unknown class '%s' in new expr\n",
             class_name);
     exit(1);
@@ -2915,6 +3223,61 @@ static LLVMValueRef codegen_assign(Node *n) {
   }
 
   Node *rhs = &n->childs->data[2];
+
+  /* ── Переприсваивание алиасов ──────────────────────────────────────────
+   *
+   *  b = c      (без &)  →  зависимая ссылка:
+   *    если b уже is_ref — обновляем хранимый указатель на alloca c
+   *    если b обычный ptr — делаем стандартный store(load(c), b)
+   *
+   *  b = &expr           →  слабая ссылка (snapshot):
+   *    если b is_ref — сбрасываем зависимость, копируем текущее значение
+   *      (меняем тип alloca нельзя, поэтому переопределяем как store-of-value)
+   *    если b обычный ptr — store(value_of_expr, b)
+   * ──────────────────────────────────────────────────────────────────── */
+
+  int rhs_is_weak = (rhs->type == NODE_UNOP && strcmp(rhs->str, "&") == 0);
+
+  if (s->is_ref) {
+    if (!rhs_is_weak) {
+      /* b = c  →  обновить зависимость: сохранить alloca источника */
+      if (rhs->type == NODE_VAR) {
+        Symbol *src = sym_lookup(rhs->str);
+        if (src) {
+          LLVMValueRef src_addr = src->is_ref
+              ? LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), src->value, "ref_src")
+              : src->value;
+          LLVMBuildStore(builder, src_addr, s->value);
+          return src_addr;
+        }
+      }
+      /* Нераспознанный RHS для зависимой ссылки — ошибка */
+      fprintf(stderr, "codegen error: dependent ref '%s' can only be reassigned to a variable (use & for snapshot)\n", name);
+      exit(1);
+    } else {
+      /* b = &expr  →  слабая копия: вычислить значение RHS и записать
+       * через хранимый указатель (перезаписываем *b = val),
+       * либо если хотим отвязать — store нового значения прямо в *ptr */
+      Node *inner = (rhs->childs->size > 0) ? &rhs->childs->data[0] : NULL;
+      if (!inner) { fprintf(stderr, "codegen error: & without operand\n"); exit(1); }
+      LLVMValueRef val = codegen_node(inner);
+      if (!val) return NULL;
+      /* Получаем текущий указатель цели и записываем туда snapshot */
+      LLVMValueRef inner_ptr = LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), s->value, "ref_ptr");
+      val = coerce_to(val, s->type);
+      LLVMBuildStore(builder, val, inner_ptr);
+      return val;
+    }
+  }
+
+  /* ── Обычная переменная ─────────────────────────────────────────────── */
+
+  if (rhs_is_weak) {
+    /* b = &expr  →  snapshot: вычислить выражение внутри & и сохранить */
+    Node *inner = (rhs->childs->size > 0) ? &rhs->childs->data[0] : NULL;
+    if (!inner) { fprintf(stderr, "codegen error: & without operand\n"); exit(1); }
+    rhs = inner;  /* снимаем &, дальше обрабатываем как обычный RHS */
+  }
 
   if (rhs->type == NODE_NEW) {
     LLVMValueRef new_ptr = codegen_new_expr(rhs);
@@ -3021,6 +3384,185 @@ static LLVMValueRef codegen_index_assign(Node *n) {
   return val;
 }
 
+static LLVMValueRef codegen_extern_var_def(Node *n) {
+  if (n->childs->size < 2)
+    return NULL;
+
+  const char *type_str = n->childs->data[0].str;
+  const char *name = n->childs->data[1].str;
+
+  // Парсим типы
+  LLVMTypeRef lltype = llvm_type_from_str(type_str);
+  LLVMTypeRef elem_type = elem_type_for(type_str);
+
+  // Проверяем, не объявлялась ли переменная ранее
+  LLVMValueRef global_var = LLVMGetNamedGlobal(mod, name);
+  if (!global_var) {
+    global_var = LLVMAddGlobal(mod, lltype, name);
+    // Главное отличие: говорим LLVM, что переменная реализована снаружи
+    LLVMSetLinkage(global_var, LLVMExternalLinkage);
+  }
+
+  // Регистрируем в нашей таблице символов
+  if (*sym_count < MAX_SYMS) {
+    strncpy(sym_table[*sym_count].name, name, 63);
+    sym_table[*sym_count].value = global_var;
+    sym_table[*sym_count].type = lltype;
+    sym_table[*sym_count].elem_type = elem_type;
+    sym_table[*sym_count].fn_type = parse_ftype_str(type_str);
+    sym_table[*sym_count].is_func = 0;
+    sym_table[*sym_count].is_vla = 0;
+    sym_table[*sym_count - 1].is_unsigned = is_type_unsigned(type_str);
+    (*sym_count)++;
+  }
+  
+  return global_var;
+}
+
+static LLVMValueRef codegen_cast(Node *n) {
+  /* NODE_CAST: str = target type string, childs[0] = expression to cast */
+  if (!n->childs || n->childs->size == 0)
+    return NULL;
+  LLVMValueRef val = codegen_node(&n->childs->data[0]);
+  if (!val)
+    return NULL;
+  const char *type_str = n->str;
+  if (!type_str || type_str[0] == '\0')
+    return val;
+  /* Strip autodel:/const: prefix if somehow present */
+  if (strncmp(type_str, "autodel:", 8) == 0) type_str += 8;
+  if (strncmp(type_str, "const:",   6) == 0) type_str += 6;
+  LLVMTypeRef target = llvm_type_from_str(type_str);
+  if (!target)
+    return val;
+  LLVMTypeRef src = LLVMTypeOf(val);
+  if (src == target)
+    return val;
+
+  LLVMTypeKind src_kind = LLVMGetTypeKind(src);
+  LLVMTypeKind dst_kind = LLVMGetTypeKind(target);
+
+  /* int <-> int */
+  if (src_kind == LLVMIntegerTypeKind && dst_kind == LLVMIntegerTypeKind) {
+    unsigned src_bits = LLVMGetIntTypeWidth(src);
+    unsigned dst_bits = LLVMGetIntTypeWidth(target);
+    if (src_bits < dst_bits)
+      return LLVMBuildZExt(builder, val, target, "cast_zext");
+    if (src_bits > dst_bits)
+      return LLVMBuildTrunc(builder, val, target, "cast_trunc");
+    return val;
+  }
+  /* float -> int */
+  if (type_is_float(src) && dst_kind == LLVMIntegerTypeKind)
+    return LLVMBuildFPToSI(builder, val, target, "cast_fp2si");
+  /* int -> float */
+  if (src_kind == LLVMIntegerTypeKind && type_is_float(target))
+    return LLVMBuildSIToFP(builder, val, target, "cast_si2fp");
+  /* float -> float */
+  if (type_is_float(src) && type_is_float(target)) {
+    if (src == LLVMFloatTypeInContext(ctx) && target == LLVMDoubleTypeInContext(ctx))
+      return LLVMBuildFPExt(builder, val, target, "cast_fpext");
+    if (src == LLVMDoubleTypeInContext(ctx) && target == LLVMFloatTypeInContext(ctx))
+      return LLVMBuildFPTrunc(builder, val, target, "cast_fptrunc");
+  }
+  /* int -> ptr */
+  if (src_kind == LLVMIntegerTypeKind && dst_kind == LLVMPointerTypeKind)
+    return LLVMBuildIntToPtr(builder, val, target, "cast_i2p");
+  /* ptr -> int */
+  if (src_kind == LLVMPointerTypeKind && dst_kind == LLVMIntegerTypeKind)
+    return LLVMBuildPtrToInt(builder, val, target, "cast_p2i");
+  /* ptr -> ptr (opaque) */
+  if (src_kind == LLVMPointerTypeKind && dst_kind == LLVMPointerTypeKind)
+    return val; /* opaque pointers are the same in LLVM opaque-ptr mode */
+
+  return val; /* fallback: no-op */
+}
+
+static LLVMValueRef get_coro_resume_intr(LLVMModuleRef M, LLVMContextRef ctx) {
+    LLVMValueRef f = LLVMGetNamedFunction(M, "llvm.coro.resume");
+    if (!f) {
+        LLVMTypeRef params[] = { LLVMPointerType(LLVMInt8TypeInContext(ctx), 0) };
+        LLVMTypeRef ty = LLVMFunctionType(LLVMVoidTypeInContext(ctx), params, 1, 0);
+        f = LLVMAddFunction(M, "llvm.coro.resume", ty);
+    }
+    return f;
+}
+
+static LLVMValueRef get_coro_done_intr(LLVMModuleRef M, LLVMContextRef ctx) {
+    LLVMValueRef f = LLVMGetNamedFunction(M, "llvm.coro.done");
+    if (!f) {
+        LLVMTypeRef params[] = { LLVMPointerType(LLVMInt8TypeInContext(ctx), 0) };
+        LLVMTypeRef ty = LLVMFunctionType(LLVMInt1TypeInContext(ctx), params, 1, 0);
+        f = LLVMAddFunction(M, "llvm.coro.done", ty);
+    }
+    return f;
+}
+
+static LLVMValueRef get_coro_destroy_intr(LLVMModuleRef M, LLVMContextRef ctx) {
+    LLVMValueRef f = LLVMGetNamedFunction(M, "llvm.coro.destroy");
+    if (!f) {
+        LLVMTypeRef params[] = { LLVMPointerType(LLVMInt8TypeInContext(ctx), 0) };
+        LLVMTypeRef ty = LLVMFunctionType(LLVMVoidTypeInContext(ctx), params, 1, 0);
+        f = LLVMAddFunction(M, "llvm.coro.destroy", ty);
+    }
+    return f;
+}
+
+/* fl_Builder.c */
+
+static void emit_coro_runtime(LLVMModuleRef M, LLVMContextRef ctx, LLVMBuilderRef B) {
+    LLVMTypeRef i8ptr = LLVMPointerType(LLVMInt8TypeInContext(ctx), 0);
+    
+    // --- 1. _coro_resume(handle) ---
+    LLVMTypeRef res_ty = LLVMFunctionType(LLVMVoidTypeInContext(ctx), &i8ptr, 1, 0);
+    LLVMValueRef res_fn = LLVMAddFunction(M, "_coro_resume", res_ty);
+    LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(ctx, res_fn, "entry");
+    LLVMPositionBuilderAtEnd(B, entry);
+    LLVMValueRef h = LLVMGetParam(res_fn, 0);
+    LLVMBuildCall2(B, LLVMGlobalGetValueType(get_coro_resume_intr(M, ctx)), get_coro_resume_intr(M, ctx), &h, 1, "");
+    LLVMBuildRetVoid(B);
+
+    // --- 2. _coro_done(handle) -> i1 ---
+    LLVMTypeRef done_ty = LLVMFunctionType(LLVMInt1TypeInContext(ctx), &i8ptr, 1, 0);
+    LLVMValueRef done_fn = LLVMAddFunction(M, "_coro_done", done_ty);
+    entry = LLVMAppendBasicBlockInContext(ctx, done_fn, "entry");
+    LLVMPositionBuilderAtEnd(B, entry);
+    h = LLVMGetParam(done_fn, 0);
+    LLVMValueRef is_done = LLVMBuildCall2(B, LLVMGlobalGetValueType(get_coro_done_intr(M, ctx)), get_coro_done_intr(M, ctx), &h, 1, "is_done");
+    LLVMBuildRet(B, is_done);
+
+    // --- 3. _coro_wait(handle) -> Блокирующий планировщик для одного Future ---
+    LLVMTypeRef wait_ty = LLVMFunctionType(LLVMVoidTypeInContext(ctx), &i8ptr, 1, 0);
+    LLVMValueRef wait_fn = LLVMAddFunction(M, "_coro_wait", wait_ty);
+    LLVMBasicBlockRef w_entry = LLVMAppendBasicBlockInContext(ctx, wait_fn, "entry");
+    LLVMBasicBlockRef w_loop  = LLVMAppendBasicBlockInContext(ctx, wait_fn, "check_done");
+    LLVMBasicBlockRef w_res   = LLVMAppendBasicBlockInContext(ctx, wait_fn, "resume");
+    LLVMBasicBlockRef w_end   = LLVMAppendBasicBlockInContext(ctx, wait_fn, "end");
+
+    LLVMTypeRef dest_ty = LLVMFunctionType(LLVMVoidTypeInContext(ctx), &i8ptr, 1, 0);
+    LLVMValueRef dest_fn = LLVMAddFunction(M, "_coro_destroy", dest_ty);
+    LLVMBasicBlockRef d_entry = LLVMAppendBasicBlockInContext(ctx, dest_fn, "entry");
+    LLVMPositionBuilderAtEnd(B, d_entry);
+    LLVMValueRef dh = LLVMGetParam(dest_fn, 0);
+    LLVMBuildCall2(B, LLVMGlobalGetValueType(get_coro_destroy_intr(M, ctx)), get_coro_destroy_intr(M, ctx), &dh, 1, "");
+    LLVMBuildRetVoid(B);
+
+    LLVMPositionBuilderAtEnd(B, w_entry);
+    LLVMBuildBr(B, w_loop);
+
+    LLVMPositionBuilderAtEnd(B, w_loop);
+    h = LLVMGetParam(wait_fn, 0);
+    is_done = LLVMBuildCall2(B, LLVMGlobalGetValueType(get_coro_done_intr(M, ctx)), get_coro_done_intr(M, ctx), &h, 1, "");
+    LLVMBuildCondBr(B, is_done, w_end, w_res);
+
+    LLVMPositionBuilderAtEnd(B, w_res);
+    LLVMBuildCall2(B, LLVMGlobalGetValueType(get_coro_resume_intr(M, ctx)), get_coro_resume_intr(M, ctx), &h, 1, "");
+    LLVMBuildBr(B, w_loop);
+
+    LLVMPositionBuilderAtEnd(B, w_end);
+    LLVMBuildRetVoid(B);
+}
+
 static LLVMValueRef codegen_node(Node *n) {
   if (!n)
     return NULL;
@@ -3041,8 +3583,26 @@ static LLVMValueRef codegen_node(Node *n) {
     return codegen_index(n);
   case NODE_VAR_DEF:
     return codegen_var_def(n);
+  case NODE_ASYNC_FUNC_DEF: /* ДОБАВЛЕНО */
+  case NODE_AWAIT_FUNC_DEF: /* ДОБАВЛЕНО */
   case NODE_FUNC_DEF:
     return codegen_func_def(n);
+  case NODE_AWAIT_CALL: {
+      // 1. Генерируем обычный вызов (он вернет i8* handle)
+      n->type = NODE_FUNC_CALL;
+      LLVMValueRef handle = codegen_func_call(n);
+      
+      // 2. Находим наш сгенерированный _coro_wait
+      LLVMValueRef wait_fn = LLVMGetNamedFunction(mod, "_coro_wait");
+      if (wait_fn && handle) {
+          // 3. Вставляем вызов ожидания
+          LLVMBuildCall2(builder, LLVMGlobalGetValueType(wait_fn), wait_fn, &handle, 1, "");
+      }
+      
+      // Возвращаем handle (на случай если программист хочет его сохранить)
+      return handle; 
+  }
+  case NODE_ASYNC_CALL:      /* ДОБАВЛЕНО */
   case NODE_FUNC_CALL:
     return codegen_func_call(n);
   case NODE_SCOPE:
@@ -3093,6 +3653,7 @@ static LLVMValueRef codegen_node(Node *n) {
     return codegen_double(n);
   case NODE_STATIC_FUNC_DEF:
     return codegen_func_def(n);
+  case NODE_CHANNEL_VAR_DEF:
   case NODE_STATIC_VAR_DEF:
     return codegen_var_def(n);
   case NODE_FOR:
@@ -3111,6 +3672,12 @@ static LLVMValueRef codegen_node(Node *n) {
     return codegen_new_expr(n);
   case NODE_TYPE_LITERAL:
     return codegen_type_literal(n);
+  case NODE_EXTERN_VAR_DEF:
+    return codegen_extern_var_def(n);
+  case NODE_EXTERN_STRUCT_DEF:
+    return codegen_struct_def(n);
+  case NODE_CAST:
+    return codegen_cast(n);
   case NODE_TYPEDEF:
     /* typedef <original_type> <alias_name>
      * childs[0] = NODE_TYPE (original), childs[1] = NODE_IDENT (alias) */
@@ -3260,6 +3827,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
       LLVMAddFunction(mod, "free", free_type);
     }
   }
+  emit_coro_runtime(mod, ctx, builder);
 
   if (!g_T_struct_type) {
     LLVMTypeRef ptr = LLVMPointerTypeInContext(ctx, 0);
@@ -3291,7 +3859,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
   }
 
   for (unsigned long long j = 0; j < nodes->size; j++) {
-    if (nodes->data[j].type == NODE_STRUCT_DEF) {
+    if (nodes->data[j].type == NODE_STRUCT_DEF || nodes->data[j].type == NODE_EXTERN_STRUCT_DEF) {
       Node *n = &nodes->data[j];
       if (n->childs->size == 0) {
         const char *sname = n->str;
@@ -3315,7 +3883,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
   }
 
   for (unsigned long long j = 0; j < nodes->size; j++)
-    if (nodes->data[j].type == NODE_EXTERN_FUNC_DEF)
+    if (nodes->data[j].type == NODE_EXTERN_FUNC_DEF || nodes->data[j].type == NODE_EXTERN_VAR_DEF)
       codegen_node(&nodes->data[j]);
 
   for (unsigned long long j = 0; j < nodes->size; j++)
@@ -3323,12 +3891,15 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
       codegen_node(&nodes->data[j]);
 
   for (unsigned long long j = 0; j < nodes->size; j++)
-    if (nodes->data[j].type == NODE_STRUCT_DEF)
+    if (nodes->data[j].type == NODE_STRUCT_DEF || nodes->data[j].type == NODE_EXTERN_STRUCT_DEF)
       codegen_node(&nodes->data[j]);
 
   for (unsigned long long j = 0; j < nodes->size; j++)
     if (nodes->data[j].type != NODE_STRUCT_DEF &&
-        nodes->data[j].type != NODE_EXTERN_FUNC_DEF)
+        nodes->data[j].type != NODE_EXTERN_STRUCT_DEF &&
+        nodes->data[j].type != NODE_EXTERN_FUNC_DEF &&
+        nodes->data[j].type != NODE_EXTERN_VAR_DEF &&
+        nodes->data[j].type != NODE_VAR_DEF)
       codegen_node(&nodes->data[j]);
 
   char *err_msg = NULL;
@@ -3340,7 +3911,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
   if (passes[0] == '\0') {
     LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
     LLVMErrorRef err = LLVMRunPasses(
-      mod, "default<O1>", machine, options
+      mod, "default<O2>", machine, options
     );
     if (err != LLVMErrorSuccess) {
       char *msg = LLVMGetErrorMessage(err);
