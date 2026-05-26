@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+
 #define MAX_SYMS  64
 #define MAX_TYPES 64
 
@@ -24,30 +25,25 @@ extern OverloadEntry* global_modules_overloads[];
 extern int global_modules_counts[];
 extern int num_imported_modules;
 
-// Функция для поиска перегрузки по искаженному имени (mangled name) в импортированных модулях
 static OverloadEntry* find_extern_overload(const char* mangled_name) {
     for (int m = 0; m < num_imported_modules; m++) {
         OverloadEntry *mod_overloads = global_modules_overloads[m];
         int mod_count = global_modules_counts[m];
         
         for (int i = 0; i < mod_count; i++) {
-            // Ищем совпадение по mangled-имени, так как в codegen приходит именно оно
             if (strcmp(mod_overloads[i].mangled, mangled_name) == 0) {
-                return &mod_overloads[i]; // Нашли!
+                return &mod_overloads[i];
             }
         }
     }
-    return NULL; // В импортированных модулях такой функции нет
+    return NULL;
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- * LLVM Coroutine Intrinsics
- * ═══════════════════════════════════════════════════════════════════ */
 
 static LLVMValueRef get_coro_id(LLVMModuleRef M, LLVMContextRef ctx) {
     LLVMValueRef f = LLVMGetNamedFunction(M, "llvm.coro.id");
     if (!f) {
-        LLVMTypeRef params[] = { LLVMInt32TypeInContext(ctx), LLVMPointerType(LLVMInt8TypeInContext(ctx), 0), 
+        LLVMTypeRef params[] = { LLVMInt32TypeInContext(ctx), LLVMPointerType(LLVMInt8TypeInContext(ctx), 0),
                                  LLVMPointerType(LLVMInt8TypeInContext(ctx), 0), LLVMPointerType(LLVMInt8TypeInContext(ctx), 0) };
         LLVMTypeRef ty = LLVMFunctionType(LLVMTokenTypeInContext(ctx), params, 4, 0);
         f = LLVMAddFunction(M, "llvm.coro.id", ty);
@@ -74,7 +70,7 @@ static LLVMValueRef get_coro_begin(LLVMModuleRef M, LLVMContextRef ctx) {
     return f;
 }
 
-// Глобальная переменная для хранения текущего хэндла корутины (coro_begin)
+
 static LLVMValueRef current_coro_handle = NULL;
 
 typedef struct {
@@ -109,7 +105,7 @@ static TypeEntry *type_table = NULL;
 static int max_types = MAX_TYPES;
 static int type_count = 0;
 
-/* ── typedef alias table ── */
+
 #define MAX_TYPEDEFS 64
 typedef struct { char alias[64]; char original[64]; } TypedefEntry;
 
@@ -125,10 +121,7 @@ static void typedef_push(const char *alias, const char *original) {
     if (typedef_count >= max_typedefs) {
         max_typedefs *= 2;
         typedef_table = realloc(typedef_table, sizeof(TypedefEntry) * max_typedefs);
-        if (!typedef_table) {
-            fprintf(stderr, "codegen error: out of memory (typedef_table)\n");
-            exit(1);
-        }
+        if (!typedef_table) error("codegen error: out of memory (typedef_table)\n");
     }
     strncpy(typedef_table[typedef_count].alias,    alias,    63);
     strncpy(typedef_table[typedef_count].original, original, 63);
@@ -148,13 +141,10 @@ static void type_push(const char *name, LLVMTypeRef type) {
   if (type_count >= max_types) {
     max_types *= 2;
     type_table = realloc(type_table, sizeof(TypeEntry) * max_types);
-    if (!type_table) {
-        fprintf(stderr, "codegen error: out of memory (type_table)\n");
-        exit(1);
-    }
+    if (!type_table) error("codegen error: out of memory (type_table)\n");
   }
   strncpy(type_table[type_count].name, name, 63);
-  type_table[typedef_count].name[63] = '\0';
+  type_table[type_count].name[63] = '\0';
   type_table[type_count].type = type;
   type_count++;
 }
@@ -184,19 +174,19 @@ static uint64_t djb2(const char *s) {
 }
 
 static LLVMValueRef codegen_type_literal(Node *n) {
-  /* n->str = "int" / "float" / имя struct */
+  
   char gname[128];
   snprintf(gname, sizeof(gname), "_T_%s", n->str);
 
   LLVMValueRef gvar = LLVMGetNamedGlobal(mod, gname);
   if (gvar)
-    return gvar; /* уже создана (примитив) */
+    return gvar;
 
   LLVMTypeRef elem_t = type_lookup(n->str);
   LLVMTypeRef ptr = LLVMPointerTypeInContext(ctx, 0);
   LLVMTypeRef i64 = LLVMInt64TypeInContext(ctx);
 
-  /* Массив хешей типов полей */
+  
   StructInfo *info = find_struct_info_by_name(n->str);
   LLVMValueRef hashes_global = LLVMConstNull(ptr);
   if (info && info->field_count > 0) {
@@ -209,7 +199,7 @@ static LLVMValueRef codegen_type_literal(Node *n) {
     LLVMValueRef harr = LLVMAddGlobal(mod, arr_t, hname);
     LLVMSetInitializer(harr, LLVMConstArray(i64, hash_vals, info->field_count));
     LLVMSetGlobalConstant(harr, 1);
-    hashes_global = harr; /* decay to pointer при передаче */
+    hashes_global = harr;
   }
 
   gvar = LLVMAddGlobal(mod, g_T_struct_type, gname);
@@ -217,7 +207,7 @@ static LLVMValueRef codegen_type_literal(Node *n) {
       elem_t ? LLVMConstInt(i64, LLVMABISizeOfType(g_data_layout, elem_t), 0)
              : LLVMConstInt(i64, 0, 0);
 
-  /* Ищем деструктор: _Foo_delete_* */
+  
   LLVMValueRef destruct_fn = LLVMConstNull(ptr);
   {
     char prefix[128];
@@ -232,7 +222,7 @@ static LLVMValueRef codegen_type_literal(Node *n) {
     }
   }
 
-  /* Ищем конструктор: _Foo_new_* */
+  
   LLVMValueRef construct_fn = LLVMConstNull(ptr);
   {
     char prefix[128];
@@ -268,8 +258,6 @@ typedef struct {
   int is_func;
   int is_vla;
   int is_unsigned;
-  /* 1 = зависимая ссылка: value — это alloca(ptr*), при чтении делаем двойной load */
-  int is_ref;
 } Symbol;
 
 static Symbol *sym_table;
@@ -283,10 +271,7 @@ static void sym_push(const char *name, LLVMValueRef val, LLVMTypeRef type,
     int old_max = max_syms;
     max_syms *= 2;
     sym_table = realloc(sym_table, sizeof(Symbol) * max_syms);
-    if (!sym_table) {
-      fprintf(stderr, "codegen error: out of memory (sym_table)\n");
-      exit(1);
-    }
+    if (!sym_table) error("codegen error: out of memory (sym_table)\n");
     memset(sym_table + old_max, 0, sizeof(Symbol) * old_max);
   }
   strncpy(sym_table[*sym_count].name, name, 63);
@@ -297,9 +282,18 @@ static void sym_push(const char *name, LLVMValueRef val, LLVMTypeRef type,
 }
 
 static Symbol *sym_lookup(const char *name) {
+  /* exact match first */
   for (int j = *sym_count - 1; j >= 0; j--)
     if (strcmp(sym_table[j].name, name) == 0)
       return &sym_table[j];
+
+  /* fallback: match SSA-renamed symbol "name#N" for lookup by base name */
+  size_t nlen = strlen(name);
+  for (int j = *sym_count - 1; j >= 0; j--) {
+    const char *sname = sym_table[j].name;
+    if (strncmp(sname, name, nlen) == 0 && sname[nlen] == '#')
+      return &sym_table[j];
+  }
 
   return NULL;
 }
@@ -309,6 +303,7 @@ static void sym_restore(int cp) { *sym_count = cp; }
 
 static LLVMBuilderRef builder;
 
+static LLVMValueRef coerce_to(LLVMValueRef val, LLVMTypeRef target);
 static LLVMTypeRef llvm_type_from_str(const char *s) {
   s = typedef_resolve(s);
   if (strchr(s, '*')) {
@@ -328,13 +323,10 @@ static LLVMTypeRef llvm_type_from_str(const char *s) {
     return LLVMDoubleTypeInContext(ctx);
   if (strcmp(s, "void") == 0)
     return LLVMVoidTypeInContext(ctx);
-  if (strcmp(s, "T") == 0)
-    return LLVMPointerTypeInContext(ctx, 0);
   LLVMTypeRef custom = type_lookup(s);
   if (custom)
     return custom;
-  fprintf(stderr, "codegen error: unknown type '%s'\n", s);
-  exit(1);
+  error("codegen error: unknown type '%s'\n", s);
   return LLVMInt32TypeInContext(ctx);
 }
 
@@ -375,7 +367,7 @@ static int type_is_float(LLVMTypeRef t) {
   return t == LLVMFloatTypeInContext(ctx) || t == LLVMDoubleTypeInContext(ctx);
 }
 
-/* Returns 1 if name is a primitive (non-struct) type */
+
 static int is_primitive_type(const char *name) {
   if (strchr(name, '*')) return 1;
   return strcmp(name, "int") == 0 || strcmp(name, "short") == 0 ||
@@ -428,7 +420,7 @@ static LLVMValueRef coerce_to(LLVMValueRef val, LLVMTypeRef target) {
 
 static LLVMValueRef codegen_node(Node *n);
 
-/* If new(val) is used with a primitive type, store val after malloc */
+
 static void codegen_new_primitive_init(LLVMValueRef ptr, LLVMTypeRef elem_t,
                                        Node *args_node) {
   if (!args_node || args_node->childs->size == 0)
@@ -442,11 +434,8 @@ static void codegen_new_primitive_init(LLVMValueRef ptr, LLVMTypeRef elem_t,
 
 static LLVMValueRef codegen_var(Node *n) {
   Symbol *s = sym_lookup(n->str);
-  if (!s) {
-    fprintf(stderr, "codegen error: undefined variable '%s'\n", n->str);
-    exit(1);
-    return NULL;
-  }
+  if (!s) error("codegen error: undefined variable '%s'\n", n->str);
+
   if (LLVMGetTypeKind(s->type) == LLVMArrayTypeKind) {
     LLVMValueRef zero = LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0);
     return LLVMBuildGEP2(builder, s->type, s->value, &zero, 1, "arrptr");
@@ -454,13 +443,7 @@ static LLVMValueRef codegen_var(Node *n) {
   if (s->is_vla) {
     return s->value;
   }
-  /* Зависимая ссылка (b = c без &):
-   * value — это alloca(ptr_type*), сначала грузим указатель, потом значение */
-  if (s->is_ref) {
-    LLVMTypeRef ptr_type = LLVMPointerTypeInContext(ctx, 0);
-    LLVMValueRef inner_ptr = LLVMBuildLoad2(builder, ptr_type, s->value, "ref_ptr");
-    return LLVMBuildLoad2(builder, s->type, inner_ptr, n->str);
-  }
+
   return LLVMBuildLoad2(builder, s->type, s->value, n->str);
 }
 
@@ -613,91 +596,13 @@ static LLVMValueRef codegen_binop(Node *n) {
     return LLVMBuildShl(builder, left, right, "shl");
   if (strcmp(op, ">>") == 0)
     return LLVMBuildAShr(builder, left, right, "shr");
-  fprintf(stderr, "codegen error: unknown operator '%s'\n", op);
-  exit(1);
+  error("codegen error: unknown operator '%s'\n", op);
   return NULL;
 }
 
 static LLVMValueRef codegen_unop(Node *n) {
   if (n->childs->size < 1)
     return NULL;
-
-  /* ── Слабая ссылка / взятие адреса: &expr ──────────────────────────────
-   * Возвращает указатель на l-value операнда, не загружая значение.
-   *   &var        → alloca переменной
-   *   &obj.field  → GEP в стековом объекте
-   *   &obj->field → GEP через указатель
-   *   &func()     → alloca временного, куда записывается результат вызова
-   *   &new() T    → то же самое
-   * ─────────────────────────────────────────────────────────────────────── */
-  if (strcmp(n->str, "&") == 0) {
-    Node *inner = &n->childs->data[0];
-
-    /* &simpleVar */
-    if (inner->type == NODE_VAR) {
-      Symbol *s = sym_lookup(inner->str);
-      if (!s) {
-        fprintf(stderr, "codegen error: undefined variable '%s'\n", inner->str);
-        exit(1);
-      }
-      /* Если источник is_ref — нужен реальный адрес, а не ptr-of-ptr */
-      if (s->is_ref)
-        return LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), s->value, "ref_addr");
-      return s->value;
-    }
-
-    /* &obj.field */
-    if (inner->type == NODE_MEMBER_DOT) {
-      Node *obj = &inner->childs->data[0];
-      Symbol *s = sym_lookup(obj->str);
-      if (!s) { fprintf(stderr, "codegen error: '%s' not found\n", obj->str); exit(1); }
-      LLVMTypeRef st = s->type;
-      if (LLVMGetTypeKind(st) != LLVMStructTypeKind) {
-        fprintf(stderr, "codegen error: '%s' is not a struct\n", obj->str); exit(1);
-      }
-      int fi = get_field_index(st, inner->str);
-      if (fi < 0) { fprintf(stderr, "codegen error: field '%s' not found\n", inner->str); exit(1); }
-      LLVMValueRef idx[] = {
-        LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
-        LLVMConstInt(LLVMInt32TypeInContext(ctx), fi, 0)
-      };
-      return LLVMBuildGEP2(builder, st, s->value, idx, 2, "field_addr");
-    }
-
-    /* &obj->field */
-    if (inner->type == NODE_MEMBER_ARROW) {
-      Node *obj = &inner->childs->data[0];
-      Symbol *s = sym_lookup(obj->str);
-      if (!s) { fprintf(stderr, "codegen error: '%s' not found\n", obj->str); exit(1); }
-      LLVMValueRef ptr = LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), s->value, "ptr");
-      LLVMTypeRef st = s->elem_type;
-      if (!st || LLVMGetTypeKind(st) != LLVMStructTypeKind) {
-        fprintf(stderr, "codegen error: '%s' is not a pointer to struct\n", obj->str); exit(1);
-      }
-      int fi = get_field_index(st, inner->str);
-      if (fi < 0) { fprintf(stderr, "codegen error: field '%s' not found\n", inner->str); exit(1); }
-      LLVMValueRef idx[] = {
-        LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
-        LLVMConstInt(LLVMInt32TypeInContext(ctx), fi, 0)
-      };
-      return LLVMBuildGEP2(builder, st, ptr, idx, 2, "field_addr");
-    }
-
-    /* &func() или &new() T — вычисляем, кладём во временный alloca */
-    if (inner->type == NODE_FUNC_CALL || inner->type == NODE_NEW ||
-        inner->type == NODE_ASYNC_CALL || inner->type == NODE_AWAIT_CALL) {
-      LLVMValueRef val = codegen_node(inner);
-      if (!val) return NULL;
-      LLVMTypeRef vt = LLVMTypeOf(val);
-      LLVMValueRef tmp = LLVMBuildAlloca(builder, vt, "tmp_addr");
-      LLVMBuildStore(builder, val, tmp);
-      return tmp;
-    }
-
-    fprintf(stderr, "codegen error: cannot take address of this expression\n");
-    exit(1);
-    return NULL;
-  }
 
   LLVMValueRef val = codegen_node(&n->childs->data[0]);
   if (!val)
@@ -712,8 +617,7 @@ static LLVMValueRef codegen_unop(Node *n) {
   }
   if (strcmp(n->str, "~") == 0)
     return LLVMBuildNot(builder, val, "bnot");
-  fprintf(stderr, "codegen error: unknown unary op '%s'\n", n->str);
-  exit(1);
+  error("codegen error: unknown unary op '%s'\n", n->str);
   return NULL;
 }
 
@@ -727,12 +631,9 @@ static LLVMValueRef codegen_index(Node *n) {
 
   if (arr_node->type == NODE_VAR) {
     Symbol *s = sym_lookup(arr_node->str);
-    if (!s) {
-      fprintf(stderr, "codegen error: undefined variable '%s'\n",
-              arr_node->str);
-      exit(1);
-      return NULL;
-    }
+    if (!s) error("codegen error: undefined variable '%s'\n",
+                   arr_node->str);
+
     LLVMTypeRef elem_type =
         s->elem_type ? s->elem_type : LLVMInt8TypeInContext(ctx);
     LLVMValueRef ptr;
@@ -757,12 +658,8 @@ static LLVMValueRef codegen_index(Node *n) {
     if (arr_node->childs->size < 1) return NULL;
     Node *var_node = &arr_node->childs->data[0];
     Symbol *s = sym_lookup(var_node->str);
-    if (!s) {
-      fprintf(stderr, "codegen error: undefined variable '%s'\n",
-              var_node->str);
-      exit(1);
-      return NULL;
-    }
+    if (!s) error("codegen error: undefined variable '%s'\n",
+                   var_node->str);
 
     LLVMTypeRef struct_type;
     LLVMValueRef struct_ptr;
@@ -776,11 +673,8 @@ static LLVMValueRef codegen_index(Node *n) {
       struct_ptr = s->value;
     }
 
-    if (!struct_type || LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
-      fprintf(stderr, "codegen error: not a struct in index\n");
-      exit(1);
-      return NULL;
-    }
+    if (!struct_type || LLVMGetTypeKind(struct_type) != LLVMStructTypeKind)
+      error("codegen error: not a struct in index\n");
 
     int field_index = get_field_index(struct_type, arr_node->str);
     if (field_index < 0)
@@ -820,18 +714,13 @@ static LLVMValueRef codegen_index(Node *n) {
           elem_type = et;
       }
       elem_ptr = LLVMBuildGEP2(builder, elem_type, base, &idx, 1, "elem_gep");
-    } else {
-      fprintf(stderr,
-              "codegen error: field is not array or pointer in index\n");
-      exit(1);
-      return NULL;
-    }
+    } else
+        error("codegen error: field is not array or pointer in index\n");
 
     return LLVMBuildLoad2(builder, elem_type, elem_ptr, "elem");
   }
 
-  fprintf(stderr, "codegen error: unsupported lhs in index expression\n");
-  exit(1);
+  error("codegen error: unsupported lhs in index expression\n");
   return NULL;
 }
 
@@ -839,12 +728,10 @@ static LLVMValueRef codegen_ptr_assign(Node *n) {
   if (n->childs->size < 2)
     return NULL;
   const char *name = n->childs->data[0].str;
+
   Symbol *s = sym_lookup(name);
-  if (!s) {
-    fprintf(stderr, "codegen error: undefined pointer '%s'\n", name);
-    exit(1);
-    return NULL;
-  }
+  if (!s) error("codegen error: undefined pointer '%s'\n", name);
+
   LLVMValueRef ptr = LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0),
                                     s->value, "ptr");
   LLVMValueRef val = codegen_node(&n->childs->data[1]);
@@ -980,7 +867,7 @@ static LLVMValueRef codegen_func_call(Node *n) {
   const char *fname = n->str;
   Symbol *s = sym_lookup(fname);
 
-  last_loaded_fn_sig = NULL; /* сбрасываем перед вычислением аргументов */
+  last_loaded_fn_sig = NULL;
 
   if (s && s->fn_type) {
     LLVMValueRef fn_ptr = LLVMBuildLoad2(
@@ -989,8 +876,8 @@ static LLVMValueRef codegen_func_call(Node *n) {
     LLVMTypeRef param_types_arr[64];
     unsigned param_count = LLVMCountParamTypes(s->fn_type);
     if (param_count > 64) {
-      fprintf(stderr, "codegen error: function '%s' has too many parameters (>64)\n", fname);
-      exit(1);
+      error("codegen error: function '%s' has too many parameters (>64)\n", fname);
+      
     }
     if (param_count > 0 && param_count <= 64)
       LLVMGetParamTypes(s->fn_type, param_types_arr);
@@ -1025,16 +912,16 @@ static LLVMValueRef codegen_func_call(Node *n) {
       func = s->value;
       ftype = s->type;
   } else {
-      func = LLVMGetNamedFunction(mod, fname); // Пытаемся найти локально
+      func = LLVMGetNamedFunction(mod, fname);
       
-      // ЕСЛИ ЛОКАЛЬНО НЕТ — ИЩЕМ В ИМПОРТАХ И ОБЪЯВЛЯЕМ
+      
       if (!func) {
-          // Здесь мы ищем fname (например, _success_) в global_modules_overloads
-          // (напишите небольшую вспомогательную функцию для поиска)
-          OverloadEntry* ext_func = find_extern_overload(fname); 
+          
+          
+          OverloadEntry* ext_func = find_extern_overload(fname);
           
           if (ext_func) {
-              // Нашли в другом модуле! Строим сигнатуру LLVM и объявляем.
+              
               LLVMTypeRef ret_t = llvm_type_from_str(ext_func->ret_type);
               LLVMTypeRef param_t[64];
               for (int i = 0; i < ext_func->param_count; i++) {
@@ -1042,17 +929,17 @@ static LLVMValueRef codegen_func_call(Node *n) {
               }
               ftype = LLVMFunctionType(ret_t, param_t, ext_func->param_count, 0);
               
-              // Создаем "заглушку" в текущем модуле, которая ссылается на внешний объектный файл
+              
               func = LLVMAddFunction(mod, fname, ftype);
-              LLVMSetLinkage(func, LLVMExternalLinkage); 
+              LLVMSetLinkage(func, LLVMExternalLinkage);
           }
       }
 
-      // Если все еще нет...
+      
       if (!func) {
-          // (Ваш существующий блок last_loaded_fn_sig или ошибка)
-          fprintf(stderr, "codegen error: undefined function '%s'\n", fname);
-          exit(1);
+          
+          error("codegen error: undefined function '%s'\n", fname);
+          
       }
       
       ftype = LLVMGlobalGetValueType(func);
@@ -1061,8 +948,8 @@ static LLVMValueRef codegen_func_call(Node *n) {
   LLVMTypeRef param_types_arr[64];
   unsigned param_types_count = LLVMCountParamTypes(ftype);
   if (param_types_count > 64) {
-    fprintf(stderr, "codegen error: function '%s' has too many parameters (>64)\n", fname);
-    exit(1);
+    error("codegen error: function '%s' has too many parameters (>64)\n", fname);
+    
   }
   if (param_types_count > 0 && param_types_count <= 64)
     LLVMGetParamTypes(ftype, param_types_arr);
@@ -1143,38 +1030,51 @@ static LLVMValueRef codegen_while(Node *n, LLVMValueRef func) {
 
 static LLVMValueRef codegen_scope(Node *n) {
   int cp = sym_checkpoint();
-  for (unsigned long long j = 0; j < n->childs->size; j++)
+  for (unsigned long long j = 0; j < n->childs->size; j++) {
+    LLVMBasicBlockRef cur_bb = LLVMGetInsertBlock(builder);
+    if (cur_bb && LLVMGetBasicBlockTerminator(cur_bb))
+      break; /* current block already has a terminator; stop emitting */
     codegen_node(&n->childs->data[j]);
+  }
   sym_restore(cp);
   return NULL;
 }
 
 static LLVMValueRef codegen_return(Node *n) {
+  LLVMBasicBlockRef cur = LLVMGetInsertBlock(builder);
+  LLVMValueRef func = LLVMGetBasicBlockParent(cur);
+
   if (n->childs->size == 0 || n->childs->data[0].type == NODE_UNDEF) {
     LLVMBuildRetVoid(builder);
+    /* open a dead block so subsequent auto-delete nodes don't corrupt the IR */
+    LLVMBasicBlockRef dead = LLVMAppendBasicBlockInContext(ctx, func, "ret.dead");
+    LLVMPositionBuilderAtEnd(builder, dead);
     return NULL;
   }
   LLVMValueRef val = codegen_node(&n->childs->data[0]);
   if (!val) {
-    fprintf(stderr, "codegen error: return expression is NULL\n");
-    exit(1);
+    error("codegen error: return expression is NULL\n");
+    
     LLVMBuildRetVoid(builder);
+    LLVMBasicBlockRef dead = LLVMAppendBasicBlockInContext(ctx, func, "ret.dead");
+    LLVMPositionBuilderAtEnd(builder, dead);
     return NULL;
   }
-  LLVMBasicBlockRef cur = LLVMGetInsertBlock(builder);
-  LLVMValueRef func = LLVMGetBasicBlockParent(cur);
   LLVMTypeRef ftype = LLVMGlobalGetValueType(func);
   LLVMTypeRef ret_type = LLVMGetReturnType(ftype);
   val = coerce_to(val, ret_type);
   LLVMBuildRet(builder, val);
+  /* open a dead block so subsequent auto-delete nodes don't corrupt the IR */
+  LLVMBasicBlockRef dead = LLVMAppendBasicBlockInContext(ctx, func, "ret.dead");
+  LLVMPositionBuilderAtEnd(builder, dead);
   return NULL;
 }
 
 static LLVMValueRef codegen_addr(Node *n) {
   Symbol *s = sym_lookup(n->str);
   if (!s) {
-    fprintf(stderr, "codegen error: undefined variable '%s'\n", n->str);
-    exit(1);
+    error("codegen error: undefined variable '%s'\n", n->str);
+    
     return NULL;
   }
   return s->value;
@@ -1188,9 +1088,9 @@ static LLVMValueRef codegen_deref(Node *n) {
   if (inner->type == NODE_VAR) {
     Symbol *s = sym_lookup(inner->str);
     if (!s) {
-      fprintf(stderr, "codegen error: undefined variable '%s' in deref\n",
+      error("codegen error: undefined variable '%s' in deref\n",
               inner->str);
-      exit(1);
+      
       return NULL;
     }
     LLVMValueRef ptr = LLVMBuildLoad2(builder, s->type, s->value, "deref_ptr");
@@ -1208,16 +1108,16 @@ static LLVMValueRef codegen_deref(Node *n) {
     }
 
     if (deepest->type != NODE_VAR) {
-      fprintf(stderr, "codegen error: complex deref chain not supported\n");
-      exit(1);
+      error("codegen error: complex deref chain not supported\n");
+      
       return NULL;
     }
 
     Symbol *s = sym_lookup(deepest->str);
     if (!s) {
-      fprintf(stderr, "codegen error: undefined variable '%s' in deref chain\n",
+      error("codegen error: undefined variable '%s' in deref chain\n",
               deepest->str);
-      exit(1);
+      
       return NULL;
     }
 
@@ -1227,8 +1127,8 @@ static LLVMValueRef codegen_deref(Node *n) {
 
     for (int i = 1; i < depth; i++) {
       if (LLVMGetTypeKind(cur_elem) != LLVMPointerTypeKind) {
-        fprintf(stderr, "codegen error: deref of non-pointer (depth %d)\n", i);
-        exit(1);
+        error("codegen error: deref of non-pointer (depth %d)\n", i);
+        
         return NULL;
       }
       char tmp_name[16];
@@ -1261,7 +1161,7 @@ static LLVMValueRef codegen_func_def(Node *n) {
   LLVMTypeRef ret_type = llvm_type_from_str(ret_str);
 
   if (n->type == NODE_ASYNC_FUNC_DEF || n->type == NODE_AWAIT_FUNC_DEF) {
-      ret_type = LLVMPointerTypeInContext(ctx, 0); 
+      ret_type = LLVMPointerTypeInContext(ctx, 0);
   }
 
   int is_extern_c = (strncmp(fname, "__extern_c__", 12) == 0);
@@ -1317,18 +1217,18 @@ static LLVMValueRef codegen_func_def(Node *n) {
       LLVMValueRef zero_i32 = LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0);
       
       LLVMValueRef id_args[] = { zero_i32, null_ptr, null_ptr, null_ptr };
-      LLVMValueRef coro_id = LLVMBuildCall2(builder, LLVMGlobalGetValueType(get_coro_id(mod, ctx)), 
+      LLVMValueRef coro_id = LLVMBuildCall2(builder, LLVMGlobalGetValueType(get_coro_id(mod, ctx)),
                                             get_coro_id(mod, ctx), id_args, 4, "coro_id");
 
-      LLVMValueRef coro_size = LLVMBuildCall2(builder, LLVMGlobalGetValueType(get_coro_size(mod, ctx)), 
+      LLVMValueRef coro_size = LLVMBuildCall2(builder, LLVMGlobalGetValueType(get_coro_size(mod, ctx)),
                                               get_coro_size(mod, ctx), NULL, 0, "coro_size");
 
       LLVMValueRef malloc_fn = LLVMGetNamedFunction(mod, "malloc");
-      LLVMValueRef allocated = LLVMBuildCall2(builder, LLVMGlobalGetValueType(malloc_fn), 
+      LLVMValueRef allocated = LLVMBuildCall2(builder, LLVMGlobalGetValueType(malloc_fn),
                                               malloc_fn, &coro_size, 1, "coro_alloc");
 
       LLVMValueRef begin_args[] = { coro_id, allocated };
-      current_coro_handle = LLVMBuildCall2(builder, LLVMGlobalGetValueType(get_coro_begin(mod, ctx)), 
+      current_coro_handle = LLVMBuildCall2(builder, LLVMGlobalGetValueType(get_coro_begin(mod, ctx)),
                                            get_coro_begin(mod, ctx), begin_args, 2, "coro_hdl");
   } else {
       current_coro_handle = NULL;
@@ -1385,9 +1285,12 @@ static LLVMValueRef codegen_func_def(Node *n) {
   }
 
   for (unsigned long long j = 0; j < scope->childs->size; j++) {
-    fprintf(stderr, "DEBUG scope j=%llu type=%d str='%s'\n", j,
+    debug("DEBUG scope j=%llu type=%d str='%s'\n", j,
             scope->childs->data[j].type,
             scope->childs->data[j].str ? scope->childs->data[j].str : "(null)");
+    LLVMBasicBlockRef cur_bb = LLVMGetInsertBlock(builder);
+    if (cur_bb && LLVMGetBasicBlockTerminator(cur_bb))
+      break; /* block already terminated; skip remaining nodes */
     codegen_node(&scope->childs->data[j]);
   }
 
@@ -1396,7 +1299,7 @@ static LLVMValueRef codegen_func_def(Node *n) {
     if (LLVMGetTypeKind(ret_type) == LLVMVoidTypeKind)
       LLVMBuildRetVoid(builder);
     else
-      LLVMBuildRet(builder, LLVMConstNull(ret_type)); // ИСПОЛЬЗУЕМ LLVMConstNull
+      LLVMBuildRet(builder, LLVMConstNull(ret_type));
   }
 
   LLVMBasicBlockRef last_bb = LLVMGetLastBasicBlock(func);
@@ -1405,7 +1308,7 @@ static LLVMValueRef codegen_func_def(Node *n) {
     if (LLVMGetTypeKind(LLVMGetReturnType(LLVMGlobalGetValueType(func))) == LLVMVoidTypeKind)
       LLVMBuildRetVoid(builder);
     else
-      LLVMBuildRet(builder, LLVMConstNull(LLVMGetReturnType(LLVMGlobalGetValueType(func)))); // ИСПОЛЬЗУЕМ LLVMConstNull
+      LLVMBuildRet(builder, LLVMConstNull(LLVMGetReturnType(LLVMGlobalGetValueType(func))));
   }
 
   sym_restore(cp);
@@ -1413,30 +1316,12 @@ static LLVMValueRef codegen_func_def(Node *n) {
   return func;
 }
 
-/* ──────────────────────────────────────────────────────────────────────────
- * Helpers: check if a NODE_DELETE inside a scope deletes a given field
- * via self->field  (NODE_MEMBER_ARROW with obj "self").
- * ────────────────────────────────────────────────────────────────────────── */
-/* ──────────────────────────────────────────────────────────────────────────
- * Helpers: check if a NODE_DELETE inside a scope deletes a given field
- * via self->field  (NODE_MEMBER_ARROW with obj "self").
- *
- * Also detects the alias pattern:
- *   TYPE* tmp = self->field;   (NODE_VAR_DEF with init = NODE_MEMBER_ARROW)
- *   delete tmp;                (NODE_DELETE with NODE_VAR whose name == tmp)
- *
- * We collect names that are known to be aliases of self->field_name and check
- * whether any NODE_DELETE targets one of those aliases.
- * ────────────────────────────────────────────────────────────────────────── */
-
-/* Collect all local variable names that are assigned from self->field_name
- * anywhere in the scope tree. Fills alias_names[]/alias_count (max 16). */
 static void collect_field_aliases(Node *scope, const char *field_name,
                                   char alias_names[16][64], int *alias_count) {
   if (!scope || !scope->childs) return;
   for (unsigned long long i = 0; i < scope->childs->size; i++) {
     Node *ch = &scope->childs->data[i];
-    /* NODE_VAR_DEF: type name = self->field  */
+    
     if (ch->type == NODE_VAR_DEF && ch->childs && ch->childs->size >= 3) {
       Node *init = &ch->childs->data[2];
       if ((init->type == NODE_MEMBER_ARROW || init->type == NODE_MEMBER_DOT) &&
@@ -1445,7 +1330,7 @@ static void collect_field_aliases(Node *scope, const char *field_name,
         strncpy(alias_names[(*alias_count)++], ch->childs->data[1].str, 63);
       }
     }
-    /* NODE_ASSIGN: tmp = self->field  */
+    
     if (ch->type == NODE_ASSIGN && ch->childs && ch->childs->size >= 3) {
       Node *rhs = &ch->childs->data[2];
       if ((rhs->type == NODE_MEMBER_ARROW || rhs->type == NODE_MEMBER_DOT) &&
@@ -1454,7 +1339,7 @@ static void collect_field_aliases(Node *scope, const char *field_name,
         strncpy(alias_names[(*alias_count)++], ch->childs->data[0].str, 63);
       }
     }
-    /* Recurse (but not into nested function definitions) */
+    
     if (ch->type != NODE_FUNC_DEF && ch->type != NODE_STATIC_FUNC_DEF)
       collect_field_aliases(ch, field_name, alias_names, alias_count);
   }
@@ -1463,23 +1348,23 @@ static void collect_field_aliases(Node *scope, const char *field_name,
 static int scope_has_delete_of_field(Node *scope, const char *field_name) {
   if (!scope) return 0;
 
-  /* Collect local aliases of self->field_name in this scope tree */
+  
   char alias_names[16][64];
   int alias_count = 0;
   collect_field_aliases(scope, field_name, alias_names, &alias_count);
 
-  /* Recursive check */
+  
   for (unsigned long long i = 0; i < scope->childs->size; i++) {
     Node *ch = &scope->childs->data[i];
     if (ch->type == NODE_DELETE && ch->childs && ch->childs->size >= 2) {
       Node *var_node = &ch->childs->data[1];
-      /* delete self->field  (direct) */
+      
       if ((var_node->type == NODE_MEMBER_ARROW ||
            var_node->type == NODE_MEMBER_DOT) &&
           var_node->str && strcmp(var_node->str, field_name) == 0) {
         return 1;
       }
-      /* delete tmp  where tmp is a known alias of self->field */
+      
       if (var_node->type == NODE_VAR && var_node->str) {
         for (int a = 0; a < alias_count; a++) {
           if (strcmp(var_node->str, alias_names[a]) == 0)
@@ -1487,7 +1372,7 @@ static int scope_has_delete_of_field(Node *scope, const char *field_name) {
         }
       }
     }
-    /* Recurse into nested scopes (but not function defs) */
+    
     if (ch->type != NODE_FUNC_DEF && ch->type != NODE_STATIC_FUNC_DEF) {
       if (scope_has_delete_of_field(ch, field_name))
         return 1;
@@ -1496,8 +1381,6 @@ static int scope_has_delete_of_field(Node *scope, const char *field_name) {
   return 0;
 }
 
-/* Collect the AST scope-node of the no-arg destructor method of class_name.
- * "No-arg" means the mangled function has exactly 1 param (self pointer). */
 static Node *find_noarg_dtor_scope(Node *struct_ast_node,
                                    const char *class_name) {
   char prefix[128];
@@ -1511,25 +1394,18 @@ static Node *find_noarg_dtor_scope(Node *struct_ast_node,
     const char *fname = ch->childs->data[1].str;
     if (!fname || strncmp(fname, prefix, strlen(prefix)) != 0)
       continue;
-    /* Check params: only self (1 param) means no-arg destructor */
+    
     Node *params = &ch->childs->data[2];
     if (params->type == NODE_PARAMS && params->childs->size == 1)
-      return &ch->childs->data[3]; /* return the scope node */
+      return &ch->childs->data[3];
   }
   return NULL;
 }
 
-/* Emit a guarded free+zero for a pointer field of `self`.
- * `self_val`  — loaded ptr to the struct object (i8* / opaque ptr)
- * `struct_t`  — the LLVM struct type
- * `field_idx` — field index inside the struct
- * `field_name`— name of the field (for diagnostics)
- * `cls`       — element class name (for destructor lookup)
- */
 static void emit_field_delete(LLVMValueRef self_val, LLVMTypeRef struct_t,
                               int field_idx, const char *field_name,
                               const char *cls, LLVMValueRef cur_fn) {
-  (void)field_name; // Fix unused parameter warning
+  (void)field_name;
   LLVMTypeRef ptr_t = LLVMPointerTypeInContext(ctx, 0);
   LLVMValueRef indices[] = {
       LLVMConstInt(LLVMInt32TypeInContext(ctx), 0, 0),
@@ -1539,7 +1415,7 @@ static void emit_field_delete(LLVMValueRef self_val, LLVMTypeRef struct_t,
   LLVMValueRef field_val =
       LLVMBuildLoad2(builder, ptr_t, field_slot, "adel_ptr");
 
-  /* Guard: if (field != NULL) */
+  
   LLVMValueRef null_ptr = LLVMConstPointerNull(ptr_t);
   LLVMValueRef is_nonnull =
       LLVMBuildICmp(builder, LLVMIntNE, field_val, null_ptr, "adel_nn");
@@ -1552,7 +1428,7 @@ static void emit_field_delete(LLVMValueRef self_val, LLVMTypeRef struct_t,
 
   LLVMPositionBuilderAtEnd(builder, then_bb);
 
-  /* Try to find a no-arg destructor for the element type */
+  
   LLVMValueRef dtor = NULL;
   if (cls && cls[0] != '\0') {
     char dtor_prefix[128];
@@ -1561,7 +1437,7 @@ static void emit_field_delete(LLVMValueRef self_val, LLVMTypeRef struct_t,
     while (fn) {
       const char *fn_name = LLVMGetValueName(fn);
       if (strncmp(fn_name, dtor_prefix, strlen(dtor_prefix)) == 0) {
-        /* Only use it if it's the no-arg variant (1 param = self) */
+        
         LLVMTypeRef ft = LLVMGlobalGetValueType(fn);
         if (LLVMCountParamTypes(ft) == 1) {
           dtor = fn;
@@ -1586,39 +1462,31 @@ static void emit_field_delete(LLVMValueRef self_val, LLVMTypeRef struct_t,
   LLVMPositionBuilderAtEnd(builder, merge_bb);
 }
 
-/* Main entry point called after all methods of a class have been codegen'd.
- *
- * Cases:
- * A) No no-arg destructor defined at all → generate one from scratch.
- * B) No-arg destructor defined → append delete-calls for pointer fields
- * that the user did NOT already delete manually, inserting them just
- * before the terminator of the last basic block.
- */
 static void codegen_auto_delete_fields(const char *class_name,
                                        LLVMTypeRef struct_type,
                                        Node *struct_ast) {
-  /* Collect pointer fields that need auto-delete */
+  
   StructInfo *si = find_struct_info_by_name(class_name);
   if (!si || si->field_count == 0)
     return;
 
-  /* Build list of pointer-type fields */
+  
   int ptr_fields[64];
-  char ptr_field_cls[64][64]; /* element class name (stripped of '*') */
+  char ptr_field_cls[64][64];
   int ptr_field_count = 0;
 
   for (int i = 0; i < si->field_count && ptr_field_count < 64; i++) {
     if (LLVMGetTypeKind(si->field_types[i]) != LLVMPointerTypeKind)
       continue;
     ptr_fields[ptr_field_count] = i;
-    /* Strip one '*' to get element class */
+    
     const char *ftn = si->field_type_names[i];
     char cls[64];
     strncpy(cls, ftn, 63);
     cls[63] = '\0';
     char *star = strrchr(cls, '*');
     if (star) *star = '\0';
-    /* Strip trailing spaces */
+    
     int cl = (int)strlen(cls);
     while (cl > 0 && cls[cl-1] == ' ') cls[--cl] = '\0';
     strncpy(ptr_field_cls[ptr_field_count], cls, 63);
@@ -1628,7 +1496,7 @@ static void codegen_auto_delete_fields(const char *class_name,
   if (ptr_field_count == 0)
     return;
 
-  /* Find the LLVM function for the no-arg destructor (if exists) */
+  
   char dtor_prefix[128];
   snprintf(dtor_prefix, sizeof(dtor_prefix), "_%s_delete_", class_name);
 
@@ -1639,7 +1507,7 @@ static void codegen_auto_delete_fields(const char *class_name,
       const char *fn_name = LLVMGetValueName(fn);
       if (strncmp(fn_name, dtor_prefix, strlen(dtor_prefix)) == 0) {
         LLVMTypeRef ft = LLVMGlobalGetValueType(fn);
-        if (LLVMCountParamTypes(ft) == 1) { /* only self → no-arg */
+        if (LLVMCountParamTypes(ft) == 1) {
           existing_dtor = fn;
           break;
         }
@@ -1648,13 +1516,11 @@ static void codegen_auto_delete_fields(const char *class_name,
     }
   }
 
-  /* Collect the AST scope of the no-arg dtor so we can check
-   * which fields the user already deletes manually. */
   Node *dtor_scope = find_noarg_dtor_scope(struct_ast, class_name);
 
-  /* ── CASE A: no dtor defined → generate one ── */
+  
   if (!existing_dtor) {
-    /* Build: void _ClassName_delete_0(ClassName* self) */
+    
     char dtor_name[128];
     snprintf(dtor_name, sizeof(dtor_name), "_%s_delete_0", class_name);
 
@@ -1670,7 +1536,7 @@ static void codegen_auto_delete_fields(const char *class_name,
         LLVMAppendBasicBlockInContext(ctx, func, "entry");
     LLVMPositionBuilderAtEnd(builder, entry);
 
-    /* self = first param */
+    
     LLVMValueRef self_slot = LLVMBuildAlloca(builder, ptr_t, "self");
     LLVMBuildStore(builder, LLVMGetParam(func, 0), self_slot);
     LLVMValueRef self_val =
@@ -1687,9 +1553,9 @@ static void codegen_auto_delete_fields(const char *class_name,
     return;
   }
 
-  /* ── CASE B: dtor exists → append deletes for fields user missed ── */
+  
 
-  /* Find the last basic block that has a ret terminator (the real exit). */
+  
   LLVMBasicBlockRef ret_bb = NULL;
   {
     LLVMBasicBlockRef bb = LLVMGetFirstBasicBlock(existing_dtor);
@@ -1701,16 +1567,12 @@ static void codegen_auto_delete_fields(const char *class_name,
     }
   }
   if (!ret_bb) {
-    /* No ret block found — dtor body is probably empty; use last bb */
+    
     ret_bb = LLVMGetLastBasicBlock(existing_dtor);
   }
   if (!ret_bb)
     return;
 
-  /* The `self` pointer is param 0 of the existing dtor.
-   * Find its alloca in the entry block: it's the first alloca whose stored
-   * value is param 0 (the store immediately follows the alloca). We do NOT
-   * rely on the alloca being named "self" — the user may name it anything. */
   LLVMValueRef self_alloca = NULL;
   {
     LLVMValueRef param0 = LLVMGetParam(existing_dtor, 0);
@@ -1719,23 +1581,20 @@ static void codegen_auto_delete_fields(const char *class_name,
       LLVMValueRef inst = LLVMGetFirstInstruction(entry_bb);
       while (inst) {
         if (LLVMGetInstructionOpcode(inst) == LLVMAlloca) {
-          /* Check whether the very next instruction is a store of param0
-           * into this alloca — that is the canonical pattern emitted by
-           * codegen_func_def for every parameter. */
           LLVMValueRef next = LLVMGetNextInstruction(inst);
           if (next && LLVMGetInstructionOpcode(next) == LLVMStore) {
-            /* store param0, alloca */
+            
             if (LLVMGetOperand(next, 0) == param0 &&
                 LLVMGetOperand(next, 1) == inst) {
               self_alloca = inst;
               break;
             }
           }
-          /* Fallback: if the alloca is named "self" use it too */
+          
           if (!self_alloca &&
               strcmp(LLVMGetValueName(inst), "self") == 0) {
             self_alloca = inst;
-            /* keep scanning in case the store-based check matches later */
+            
           }
         }
         inst = LLVMGetNextInstruction(inst);
@@ -1743,7 +1602,7 @@ static void codegen_auto_delete_fields(const char *class_name,
     }
   }
 
-  /* Count how many fields we will actually emit */
+  
   int emit_count = 0;
   for (int k = 0; k < ptr_field_count; k++) {
     const char *field_name = si->field_names[ptr_fields[k]];
@@ -1756,13 +1615,10 @@ static void codegen_auto_delete_fields(const char *class_name,
     return;
   }
 
-  /* Insert a new block "adel_start" just before ret_bb.
-   * All predecessors of ret_bb are redirected to adel_start,
-   * and adel_start falls through to ret_bb after the deletes. */
   LLVMBasicBlockRef adel_start =
       LLVMInsertBasicBlockInContext(ctx, ret_bb, "adel_start");
 
-  /* Redirect predecessors of ret_bb → adel_start */
+  
   {
     LLVMUseRef pred_use = LLVMGetFirstUse(LLVMBasicBlockAsValue(ret_bb));
     while (pred_use) {
@@ -1781,7 +1637,7 @@ static void codegen_auto_delete_fields(const char *class_name,
 
   LLVMPositionBuilderAtEnd(builder, adel_start);
 
-  /* Load self pointer in adel_start */
+  
   LLVMTypeRef ptr_t = LLVMPointerTypeInContext(ctx, 0);
   LLVMValueRef self_val = self_alloca
       ? LLVMBuildLoad2(builder, ptr_t, self_alloca, "self_adel")
@@ -1791,7 +1647,7 @@ static void codegen_auto_delete_fields(const char *class_name,
     int fi = ptr_fields[k];
     const char *field_name = si->field_names[fi];
 
-    /* Skip if user already wrote delete for this field */
+    
     if (dtor_scope && scope_has_delete_of_field(dtor_scope, field_name))
       continue;
 
@@ -1799,7 +1655,7 @@ static void codegen_auto_delete_fields(const char *class_name,
                       field_name, ptr_field_cls[k], existing_dtor);
   }
 
-  /* After last adel_merge, jump to the original ret block */
+  
   LLVMBuildBr(builder, ret_bb);
 
   LLVMClearInsertionPosition(builder);
@@ -1810,11 +1666,20 @@ static LLVMValueRef codegen_struct_def(Node *n) {
   char class_name[64] = "";
   char parent_name[64] = "";
   const char *delim = strchr(full_name, '<');
+  const char *ctxs = strchr(full_name, ':');
   if (delim) {
     int len = delim - full_name;
     strncpy(class_name, full_name, len);
     class_name[len] = '\0';
-    strncpy(parent_name, delim + 1, 63);
+    char pn[64] = "";
+    if (ctxs) {
+      strncpy(pn, delim + 1, 63);
+      strncpy(parent_name, pn, ctxs - delim - 1);
+    }
+    else {
+      strncpy(parent_name, delim + 1, 63);
+    }
+    debug("codegen: parent %s of %s\n", parent_name, class_name);
   } else {
     strncpy(class_name, full_name, 63);
   }
@@ -1846,8 +1711,8 @@ static LLVMValueRef codegen_struct_def(Node *n) {
     if (child->type == NODE_STATIC_VAR_DEF)
       continue;
     if (child->childs->size < 1) {
-      fprintf(stderr, "codegen error: struct field missing type\n");
-      exit(1);
+      error("codegen error: struct field missing type\n");
+      
       return NULL;
     }
 
@@ -1879,28 +1744,29 @@ static LLVMValueRef codegen_struct_def(Node *n) {
     field_count++;
   }
 
-  LLVMTypeRef struct_type = type_lookup(n->str);
+  LLVMTypeRef struct_type = type_lookup(class_name);
   if (!struct_type) {
-    struct_type = LLVMStructCreateNamed(ctx, n->str);
-    type_push(n->str, struct_type);
+    struct_type = LLVMStructCreateNamed(ctx, class_name);
+    type_push(class_name, struct_type);
+    debug("codegen: struct %s\n", class_name);
   }
   LLVMStructSetBody(struct_type, field_types, field_count, 0);
 
-  StructInfo *si = find_struct_info_by_name(n->str);
+  StructInfo *si = find_struct_info_by_name(class_name);
   if (!si) {
     if (struct_info_count >= max_struct_infos) {
       int old_max = max_struct_infos;
       max_struct_infos *= 2;
       struct_info = realloc(struct_info, sizeof(StructInfo) * max_struct_infos);
       if (!struct_info) {
-        fprintf(stderr, "codegen error: out of memory (struct_info)\n");
-        exit(1);
+        error("codegen error: out of memory (struct_info)\n");
+        
       }
       memset(struct_info + old_max, 0, sizeof(StructInfo) * old_max);
     }
     si = &struct_info[struct_info_count++];
   }
-  strncpy(si->name, n->str, 63);
+  strncpy(si->name, class_name, 63);
   strncpy(si->parent_name, parent_name, 63);
   si->type = struct_type;
   si->field_count = (int)field_count;
@@ -1920,7 +1786,7 @@ static LLVMValueRef codegen_struct_def(Node *n) {
     const char *field_type_str = child->childs->data[0].str;
     const char *field_name = child->childs->data[1].str;
     char global_name[128];
-    snprintf(global_name, sizeof(global_name), "%s_%s", n->str, field_name);
+    snprintf(global_name, sizeof(global_name), "%s_%s", class_name, field_name);
     LLVMTypeRef fn_sig_g = parse_ftype_str(field_type_str);
     LLVMTypeRef gtype = fn_sig_g ? LLVMPointerType(fn_sig_g, 0)
                                  : llvm_type_from_str(field_type_str);
@@ -1941,7 +1807,7 @@ static LLVMValueRef codegen_struct_def(Node *n) {
       codegen_func_def(child);
   }
 
-  /* ── Auto-delete pointer fields in the no-arg destructor ── */
+  
   codegen_auto_delete_fields(class_name, struct_type, n);
 
   LLVMClearInsertionPosition(builder);
@@ -1950,8 +1816,8 @@ static LLVMValueRef codegen_struct_def(Node *n) {
 
 static void codegen_new(Node *n, LLVMValueRef var_ptr, LLVMTypeRef elem_type) {
   if (!elem_type) {
-    fprintf(stderr, "codegen error: unknown class type in new\n");
-    exit(1);
+    error("codegen error: unknown class type in new\n");
+    
     return;
   }
 
@@ -1960,12 +1826,12 @@ static void codegen_new(Node *n, LLVMValueRef var_ptr, LLVMTypeRef elem_type) {
   LLVMTypeRef malloc_param[1];
   LLVMGetParamTypes(malloc_type, malloc_param);
 
-  /* Если тип — переменная T (runtime type info), берём size из структуры _T */
+  
   LLVMValueRef size_val;
   Symbol *ts = sym_lookup(n->str);
   if (ts && g_T_struct_type &&
       LLVMGetTypeKind(ts->type) == LLVMPointerTypeKind) {
-    /* Проверяем что это реально T: смотрим элемент-тип через StructGEP */
+    
     LLVMValueRef t_ptr = LLVMBuildLoad2(
         builder, LLVMPointerTypeInContext(ctx, 0), ts->value, "tptr");
     LLVMValueRef sz_gep =
@@ -2172,6 +2038,10 @@ static LLVMValueRef codegen_var_def(Node *n) {
       sym_table[*sym_count].is_unsigned = is_type_unsigned(type_str);
       (*sym_count)++;
     }
+    else {
+      error("codegen: out of memory (sym)");
+      
+    }
     return ptr;
   }
 
@@ -2182,50 +2052,12 @@ static LLVMValueRef codegen_var_def(Node *n) {
   if (cur_block) {
     LLVMValueRef ptr = NULL;
     Node *init_node = NULL;
-    
-    /* ── Определяем семантику инициализатора для указателей ──
-     *
-     *  is_dep = 1  →  зависимая ссылка:  int* b = c
-     *                 b хранит адрес alloca c и при чтении делает двойной load.
-     *                 При переприсваивании b = x обновляет хранимый адрес.
-     *
-     *  is_dep = 0  →  слабая / независимая копия:  int* b = &c  /  b = func()  / etc.
-     *                 b — обычная alloca, инициализируется текущим значением RHS.
-     */
-    int is_dep = 0;
 
     if (n->childs->size >= 3 && n->childs->data[2].type != NODE_UNDEF) {
         init_node = &n->childs->data[2];
-        if (LLVMGetTypeKind(lltype) == LLVMPointerTypeKind) {
-            /* Зависимая ссылка: RHS — простая переменная того же типа указателя
-             * и без оператора &  →  b зеркалит alloca источника */
-            if (init_node->type == NODE_VAR) {
-                Symbol *src = sym_lookup(init_node->str);
-                if (src && src->type == lltype && !src->is_ref) {
-                    is_dep = 1;
-                } else if (src && src->is_ref) {
-                    /* источник сам is_ref — копируем его alloca-of-ptr */
-                    is_dep = 1;
-                }
-            }
-            /* Слабая ссылка: &expr — снимаем & чтобы получить l-value адрес */
-            else if (init_node->type == NODE_UNOP && strcmp(init_node->str, "&") == 0) {
-                /* оставляем init_node как есть — codegen_node(NODE_UNOP &) вернёт ptr */
-                is_dep = 0;
-            }
-            /* Всё остальное (func(), new(), obj->f, ...) — слабая копия */
-        }
     }
 
-    /* Alloca:
-     *   is_dep=1 → alloca(ptr_to_ptr) чтобы хранить адрес источника
-     *   is_dep=0 → обычная alloca(lltype) */
-    if (is_dep) {
-        LLVMTypeRef ptr_to_ptr = LLVMPointerTypeInContext(ctx, 0);
-        ptr = LLVMBuildAlloca(builder, ptr_to_ptr, name);
-    } else {
-        ptr = LLVMBuildAlloca(builder, lltype, name);
-    }
+    ptr = LLVMBuildAlloca(builder, lltype, name);
 
     if (*sym_count < MAX_SYMS) {
       strncpy(sym_table[*sym_count].name, name, 63);
@@ -2235,37 +2067,23 @@ static LLVMValueRef codegen_var_def(Node *n) {
       sym_table[*sym_count].fn_type  = NULL;
       sym_table[*sym_count].is_func  = 0;
       sym_table[*sym_count].is_vla   = 0;
-      sym_table[*sym_count].is_ref   = is_dep;
       sym_table[*sym_count].is_unsigned = is_type_unsigned(type_str);
       (*sym_count)++;
     }
 
     if (init_node) {
-      if (is_dep) {
-          /* Зависимая ссылка — сохраняем адрес alloca источника */
-          Symbol *src = sym_lookup(init_node->str);
-          if (src) {
-              /* Если источник тоже is_ref — копируем его ptr-of-ptr значение */
-              LLVMValueRef src_addr = src->is_ref
-                  ? LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), src->value, "ref_src")
-                  : src->value;
-              LLVMBuildStore(builder, src_addr, ptr);
-          }
+      if (init_node->type == NODE_NEW) {
+        codegen_new(init_node, ptr, elem_type);
+      } else if (init_node->type == NODE_INDEX &&
+                 LLVMGetTypeKind(lltype) == LLVMPointerTypeKind) {
+        LLVMValueRef addr = codegen_index_addr(init_node);
+        if (addr) LLVMBuildStore(builder, addr, ptr);
       } else {
-          /* Слабая / обычная копия */
-          if (init_node->type == NODE_NEW) {
-              codegen_new(init_node, ptr, elem_type);
-          } else if (init_node->type == NODE_INDEX &&
-                     LLVMGetTypeKind(lltype) == LLVMPointerTypeKind) {
-              LLVMValueRef addr = codegen_index_addr(init_node);
-              if (addr) LLVMBuildStore(builder, addr, ptr);
-          } else {
-              LLVMValueRef init = codegen_node(init_node);
-              if (init) {
-                  init = coerce_to(init, lltype);
-                  LLVMBuildStore(builder, init, ptr);
-              }
-          }
+        LLVMValueRef init = codegen_node(init_node);
+        if (init) {
+          init = coerce_to(init, lltype);
+          LLVMBuildStore(builder, init, ptr);
+        }
       }
     }
     return ptr;
@@ -2294,14 +2112,14 @@ static LLVMValueRef codegen_member_dot(Node *n) {
     Symbol *gs = sym_lookup(global_name);
     if (gs)
       return LLVMBuildLoad2(builder, gs->type, gs->value, global_name);
-    fprintf(stderr, "codegen error: undefined variable '%s'\n", left->str);
-    exit(1);
+    error("codegen error: undefined variable '%s'\n", left->str);
+    
     return NULL;
   }
   LLVMTypeRef struct_type = s->type;
   if (LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
-    fprintf(stderr, "codegen error: '%s' is not a struct\n", left->str);
-    exit(1);
+    error("codegen error: '%s' is not a struct\n", left->str);
+    
     return NULL;
   }
   int field_index = get_field_index(struct_type, n->str);
@@ -2328,9 +2146,9 @@ static LLVMValueRef codegen_member_arrow(Node *n) {
                                     s->value, "ptr");
   LLVMTypeRef struct_type = s->elem_type;
   if (!struct_type || LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
-    fprintf(stderr, "codegen error: '%s' is not a pointer to struct\n",
+    error("codegen error: '%s' is not a pointer to struct\n",
             left->str);
-    exit(1);
+    
     return NULL;
   }
   int field_index = get_field_index(struct_type, n->str);
@@ -2371,15 +2189,15 @@ static LLVMValueRef codegen_member_assign(Node *n) {
         LLVMBuildStore(builder, val, gs->value);
         return val;
       }
-      fprintf(stderr, "codegen error: undefined variable '%s'\n",
+      error("codegen error: undefined variable '%s'\n",
               var_node->str);
-      exit(1);
+      
       return NULL;
     }
     LLVMTypeRef struct_type = s->type;
     if (LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
-      fprintf(stderr, "codegen error: '%s' is not a struct\n", var_node->str);
-      exit(1);
+      error("codegen error: '%s' is not a struct\n", var_node->str);
+      
       return NULL;
     }
     int field_index = get_field_index(struct_type, member_expr->str);
@@ -2397,16 +2215,16 @@ static LLVMValueRef codegen_member_assign(Node *n) {
     Node *var_node = &member_expr->childs->data[0];
     Symbol *s = sym_lookup(var_node->str);
     if (!s) {
-      fprintf(stderr, "codegen error: undefined variable '%s'\n",
+      error("codegen error: undefined variable '%s'\n",
               var_node->str);
-      exit(1);
+      
       return NULL;
     }
     LLVMTypeRef struct_type = s->elem_type;
     if (!struct_type || LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
-      fprintf(stderr, "codegen error: '%s' is not a pointer to struct\n",
+      error("codegen error: '%s' is not a pointer to struct\n",
               var_node->str);
-      exit(1);
+      
       return NULL;
     }
     LLVMValueRef ptr_val = LLVMBuildLoad2(
@@ -2420,9 +2238,8 @@ static LLVMValueRef codegen_member_assign(Node *n) {
     field_ptr = LLVMBuildGEP2(builder, struct_type, ptr_val, indices, 2, "gep");
     field_type = LLVMStructGetTypeAtIndex(struct_type, field_index);
   } else {
-    fprintf(stderr,
-            "codegen error: expected member expression in assignment\n");
-    exit(1);
+    error("codegen error: expected member expression in assignment\n");
+    
     return NULL;
   }
   if (!field_ptr)
@@ -2443,25 +2260,25 @@ static LLVMValueRef codegen_string(Node *n) {
 static int get_field_index(LLVMTypeRef struct_type, const char *field_name) {
   StructInfo *info = find_struct_info_by_type(struct_type);
   if (!info) {
-    fprintf(stderr, "codegen error: unknown struct type\n");
-    exit(1);
+    error("codegen error: unknown struct type\n");
+    
     return -1;
   }
   for (int i = 0; i < info->field_count; i++) {
     if (strcmp(info->field_names[i], field_name) == 0)
       return i;
   }
-  fprintf(stderr, "codegen error: field '%s' not found in struct\n",
+  error("codegen error: field '%s' not found in struct\n",
           field_name);
-  exit(1);
+  
   return -1;
 }
 
 static LLVMValueRef codegen_sizeof(Node *n) {
   LLVMTypeRef t = llvm_type_from_str(n->str);
   if (!t) {
-    fprintf(stderr, "codegen error: unknown type '%s' in sizeof\n", n->str);
-    exit(1);
+    error("codegen error: unknown type '%s' in sizeof\n", n->str);
+    
     return NULL;
   }
   return LLVMSizeOf(t);
@@ -2471,14 +2288,14 @@ static LLVMValueRef codegen_asm(Node *n) {
   if (!n || !n->str)
     return NULL;
 
-  // Создаем копию строки, чтобы разделить ее символом '\x01'
+  
   char *str_copy = strdup(n->str);
   char *instr_str = str_copy;
   char *out_csv = strchr(instr_str, '\x01');
   char *clobber_csv = NULL;
   char *in_csv = NULL;
 
-  // Парсинг секций по разделителю \x01
+  
   if (out_csv) {
     *out_csv++ = '\0';
     clobber_csv = strchr(out_csv, '\x01');
@@ -2500,7 +2317,7 @@ static LLVMValueRef codegen_asm(Node *n) {
   LLVMTypeRef ret_type = LLVMVoidTypeInContext(ctx);
   char out_var_name[64] = "";
 
-  // 1. Обработка выходной переменной (outputs_csv: "reg:varName")
+  
   if (out_csv && out_csv[0] != '\0') {
     char *colon = strchr(out_csv, ':');
     if (colon) {
@@ -2514,15 +2331,15 @@ static LLVMValueRef codegen_asm(Node *n) {
         ret_type = i64;
         snprintf(constraints, sizeof(constraints), "={%s}", reg);
       } else {
-        fprintf(stderr, "codegen error: undefined output variable '%s' in asm\n", var);
-        exit(1);
+        error("codegen error: undefined output variable '%s' in asm\n", var);
+        
       }
     }
   }
 
-  // 2. Обработка позиционных переменных-аргументов из дочерних узлов (напр. $0, $1)
+  
   unsigned total_childs = (unsigned)n->childs->size;
-  // Первый узел — архитектура (NODE_IDENT), последний — для обратной совместимости (out_node)
+  
   unsigned input_count = (total_childs >= 2) ? total_childs - 2 : 0;
 
   for (unsigned j = 0; j < input_count && argc < 64; j++) {
@@ -2532,8 +2349,8 @@ static LLVMValueRef codegen_asm(Node *n) {
 
     Symbol *s = sym_lookup(op->str);
     if (!s) {
-      fprintf(stderr, "codegen error: undefined variable '%s' in asm\n", op->str);
-      exit(1);
+      error("codegen error: undefined variable '%s' in asm\n", op->str);
+      
     }
 
     LLVMValueRef val = LLVMBuildLoad2(builder, s->type, s->value, op->str);
@@ -2555,7 +2372,7 @@ static LLVMValueRef codegen_asm(Node *n) {
     argc++;
   }
 
-  // 3. Обработка явных входных регистров (inputs_csv: "reg:varName,reg2:varName2")
+  
   if (in_csv && in_csv[0] != '\0') {
     char *in_copy = strdup(in_csv);
     char *token = strtok(in_copy, ",");
@@ -2566,20 +2383,26 @@ static LLVMValueRef codegen_asm(Node *n) {
         char *reg = token;
         char *var = colon + 1;
 
-        Symbol *s = sym_lookup(var);
-        if (!s) {
-          fprintf(stderr, "codegen error: undefined input variable '%s' in asm\n", var);
-          exit(1);
-        }
-
-        LLVMValueRef val = LLVMBuildLoad2(builder, s->type, s->value, var);
-        LLVMTypeKind kind = LLVMGetTypeKind(LLVMTypeOf(val));
-        if (kind == LLVMIntegerTypeKind) {
-          unsigned bits = LLVMGetIntTypeWidth(LLVMTypeOf(val));
-          if (bits < 64)
-            val = LLVMBuildZExt(builder, val, i64, "zext64");
-        } else if (kind == LLVMPointerTypeKind) {
-          val = LLVMBuildPtrToInt(builder, val, i64, "ptr2int");
+        LLVMValueRef val;
+        if (var[0] == '#') {
+          /* numeric literal constant encoded by parser as #<digits> */
+          long long imm = strtoll(var + 1, NULL, 0);
+          val = LLVMConstInt(i64, (unsigned long long)imm, 0);
+        } else {
+          Symbol *s = sym_lookup(var);
+          if (!s) {
+            error("Error in %s:\n\tat [line: %i; col: %i] => unknown variable '%s' in ASM input\n",
+                   n->begin.file, n->begin.line, n->begin.col, var);
+          }
+          val = LLVMBuildLoad2(builder, s->type, s->value, var);
+          LLVMTypeKind kind = LLVMGetTypeKind(LLVMTypeOf(val));
+          if (kind == LLVMIntegerTypeKind) {
+            unsigned bits = LLVMGetIntTypeWidth(LLVMTypeOf(val));
+            if (bits < 64)
+              val = LLVMBuildZExt(builder, val, i64, "zext64");
+          } else if (kind == LLVMPointerTypeKind) {
+            val = LLVMBuildPtrToInt(builder, val, i64, "ptr2int");
+          }
         }
 
         param_types[argc] = LLVMTypeOf(val);
@@ -2597,7 +2420,7 @@ static LLVMValueRef codegen_asm(Node *n) {
     free(in_copy);
   }
 
-  // 4. Обработка Clobbers-регистров (clobbers_csv: "rax,rdi,memory")
+  
   if (clobber_csv && clobber_csv[0] != '\0') {
     char *clob_copy = strdup(clobber_csv);
     char *token = strtok(clob_copy, ",");
@@ -2612,7 +2435,7 @@ static LLVMValueRef codegen_asm(Node *n) {
     free(clob_copy);
   }
 
-  // Создаем сигнатуру функции и вызываем inline asm
+  
   LLVMTypeRef func_type = LLVMFunctionType(ret_type, param_types, argc, 0);
   LLVMValueRef asm_func =
       LLVMGetInlineAsm(func_type, instr_str, strlen(instr_str), constraints,
@@ -2621,7 +2444,7 @@ static LLVMValueRef codegen_asm(Node *n) {
   LLVMValueRef result = LLVMBuildCall2(builder, func_type, asm_func, args, argc,
                                        out_var_name[0] != '\0' ? "asmret" : "");
 
-  // Если была выходная переменная - сохраняем результат
+  
   if (out_var_name[0] != '\0') {
     Symbol *s = sym_lookup(out_var_name);
     if (s) {
@@ -2711,17 +2534,16 @@ static LLVMValueRef codegen_delete(Node *n) {
   if (n->childs->size < 2)
     return NULL;
 
-  fprintf(stderr, "codegen_delete: childs=%p size=%llu\n", (void *)n->childs,
-          n->childs ? n->childs->size : 0);
   if (!n->childs || n->childs->size < 2) {
-    fprintf(stderr, "codegen_delete: not enough children!\n");
-    exit(1);
+    error("codegen_delete: not enough children!\n");
+    
     return NULL;
   }
   Node *args_node = &n->childs->data[0];
   Node *var_node = &n->childs->data[1];
-  fprintf(stderr, "codegen_delete: var_node type=%d str='%s'\n", var_node->type,
-          var_node->str ? var_node->str : "(null)");
+  debug("DEBUG codegen in %s:\n\t at [line: %i; col: %i] => codegen_delete '%s' (type: %d)\n", 
+         var_node->begin.file, var_node->begin.line, var_node->begin.col,
+         var_node->str ? var_node->str : "(null)", var_node->type);
 
   LLVMValueRef ptr = NULL;
   LLVMValueRef ptr_slot = NULL;
@@ -2730,9 +2552,9 @@ static LLVMValueRef codegen_delete(Node *n) {
   if (var_node->type == NODE_VAR) {
     Symbol *s = sym_lookup(var_node->str);
     if (!s) {
-      fprintf(stderr, "codegen error: undefined variable '%s' in delete\n",
+      error("codegen error: undefined variable '%s' in delete\n",
               var_node->str);
-      exit(1);
+      
       return NULL;
     }
     if (LLVMGetTypeKind(s->type) != LLVMPointerTypeKind)
@@ -2746,16 +2568,16 @@ static LLVMValueRef codegen_delete(Node *n) {
     Node *obj_node = &var_node->childs->data[0];
     Symbol *s = sym_lookup(obj_node->str);
     if (!s) {
-      fprintf(stderr, "codegen error: undefined '%s' in delete member\n",
+      error("codegen error: undefined '%s' in delete member\n",
               obj_node->str);
-      exit(1);
+      
       return NULL;
     }
     LLVMTypeRef struct_type = s->elem_type;
     if (!struct_type || LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
-      fprintf(stderr, "codegen error: elem_type is NULL for '%s'\n",
+      error("codegen error: elem_type is NULL for '%s'\n",
               obj_node->str);
-      exit(1);
+      
       return NULL;
     }
 
@@ -2804,8 +2626,8 @@ static LLVMValueRef codegen_delete(Node *n) {
       }
     }
   } else {
-    fprintf(stderr, "codegen error: unsupported var_node type in delete\n");
-    exit(1);
+    error("codegen error: unsupported var_node type in delete\n");
+    
     return NULL;
   }
 
@@ -2864,7 +2686,7 @@ static LLVMValueRef codegen_delete(Node *n) {
     }
   }
 
-  /* Guard: if (ptr != null) — используем LLVMConstPointerNull для сравнения */
+  
   LLVMTypeRef ptr_t = LLVMPointerTypeInContext(ctx, 0);
   LLVMValueRef null_ptr = LLVMConstPointerNull(ptr_t);
   LLVMValueRef is_nonzero =
@@ -2879,7 +2701,7 @@ static LLVMValueRef codegen_delete(Node *n) {
 
   LLVMBuildCondBr(builder, is_nonzero, then_bb, merge_bb);
 
-  /* --- then: ptr != 0, вызываем деструктор + free + обнуляем --- */
+  
   LLVMPositionBuilderAtEnd(builder, then_bb);
 
   if (dtor) {
@@ -2913,7 +2735,7 @@ static LLVMValueRef codegen_delete(Node *n) {
 
   LLVMBuildBr(builder, merge_bb);
 
-  /* --- merge: продолжаем после проверки --- */
+  
   LLVMPositionBuilderAtEnd(builder, merge_bb);
 
   return NULL;
@@ -2965,7 +2787,7 @@ static LLVMValueRef codegen_member_index_assign(Node *n) {
   inner_idx = coerce_to(inner_idx, LLVMInt32TypeInContext(ctx));
 
   if (lhs->type != NODE_MEMBER_DOT && lhs->type != NODE_MEMBER_ARROW) {
-    fprintf(stderr, "codegen error: unsupported lhs in member_index_assign\n");
+    error("codegen error: unsupported lhs in member_index_assign\n");
     return NULL;
   }
 
@@ -2987,7 +2809,7 @@ static LLVMValueRef codegen_member_index_assign(Node *n) {
       Node *base_var = &arr_expr->childs->data[0];
       Symbol *s = sym_lookup(base_var->str);
       if (!s) {
-        fprintf(stderr, "codegen error: undefined '%s'\n", base_var->str);
+        error("codegen error: undefined '%s'\n", base_var->str);
         return NULL;
       }
 
@@ -3004,7 +2826,7 @@ static LLVMValueRef codegen_member_index_assign(Node *n) {
 
       if (!base_struct_type ||
           LLVMGetTypeKind(base_struct_type) != LLVMStructTypeKind) {
-        fprintf(stderr, "codegen error: not a struct in chain\n");
+        error("codegen error: not a struct in chain\n");
         return NULL;
       }
 
@@ -3041,7 +2863,7 @@ static LLVMValueRef codegen_member_index_assign(Node *n) {
         LLVMValueRef base_loaded =
             LLVMBuildLoad2(builder, arr_field_type, arr_field_ptr, "arr_base");
         if (!elem_struct_type) {
-          fprintf(stderr, "codegen error: unknown element type in chain\n");
+          error("codegen error: unknown element type in chain\n");
           return NULL;
         }
         struct_ptr = LLVMBuildGEP2(builder, elem_struct_type, base_loaded,
@@ -3055,11 +2877,11 @@ static LLVMValueRef codegen_member_index_assign(Node *n) {
                                    indices, 2, "elem_ptr");
         struct_type = arr_elem_type;
       } else {
-        fprintf(stderr, "codegen error: field is not array or pointer\n");
+        error("codegen error: field is not array or pointer\n");
         return NULL;
       }
     } else {
-      fprintf(stderr, "codegen error: unsupported array expr in chain\n");
+      error("codegen error: unsupported array expr in chain\n");
       return NULL;
     }
   } else if (lhs_child->type == NODE_VAR ||
@@ -3067,7 +2889,7 @@ static LLVMValueRef codegen_member_index_assign(Node *n) {
              lhs_child->type == NODE_MEMBER_DOT) {
     Symbol *s = sym_lookup(lhs_child->str);
     if (!s) {
-      fprintf(stderr, "codegen error: undefined '%s'\n", lhs_child->str);
+      error("codegen error: undefined '%s'\n", lhs_child->str);
       return NULL;
     }
     if (lhs->type == NODE_MEMBER_ARROW) {
@@ -3079,14 +2901,13 @@ static LLVMValueRef codegen_member_index_assign(Node *n) {
       struct_ptr = s->value;
     }
   } else {
-    fprintf(stderr,
-            "codegen error: unsupported lhs child in member_index_assign\n");
+    error("codegen error: unsupported lhs child in member_index_assign\n");
     return NULL;
   }
 
   if (!struct_ptr || !struct_type ||
       LLVMGetTypeKind(struct_type) != LLVMStructTypeKind) {
-    fprintf(stderr, "codegen error: could not resolve struct in chain\n");
+    error("codegen error: could not resolve struct in chain\n");
     return NULL;
   }
 
@@ -3130,7 +2951,7 @@ static LLVMValueRef codegen_member_index_assign(Node *n) {
     elem_ptr =
         LLVMBuildGEP2(builder, elem_type, base, &inner_idx, 1, "elem_gep");
   } else {
-    fprintf(stderr, "codegen error: field '%s' is not array or pointer\n",
+    error("codegen error: field '%s' is not array or pointer\n",
             field_name);
     return NULL;
   }
@@ -3148,12 +2969,12 @@ static LLVMValueRef codegen_new_expr(Node *n) {
   LLVMTypeRef elem_type = type_lookup(class_name);
   if (!elem_type) {
       elem_type = llvm_type_from_str(class_name);
-  }
-  if (!elem_type) {
-    fprintf(stderr, "codegen error: unknown class '%s' in new expr\n",
-            class_name);
-    exit(1);
-    return NULL;
+
+      if (!elem_type) {
+        error("codegen error: unknown type '%s' in new expr\n",
+                class_name);
+        
+      }
   }
 
   LLVMValueRef size_val = LLVMSizeOf(elem_type);
@@ -3162,10 +2983,15 @@ static LLVMValueRef codegen_new_expr(Node *n) {
   LLVMTypeRef malloc_param[1];
   LLVMGetParamTypes(malloc_type, malloc_param);
   size_val = coerce_to(size_val, malloc_param[0]);
-  LLVMValueRef ptr =
-      LLVMBuildCall2(builder, malloc_type, malloc_fn, &size_val, 1, "newptr");
 
-  /* Primitive init: int *x = new(5)  =>  *x = 5 */
+  LLVMValueRef ptr = LLVMBuildCall2(builder,
+      malloc_type,
+      malloc_fn,
+      &size_val,
+      1,
+      "newptr");
+
+  
   if (is_primitive_type(class_name)) {
     Node *args_node = &n->childs->data[1];
     codegen_new_primitive_init(ptr, elem_type, args_node);
@@ -3217,66 +3043,36 @@ static LLVMValueRef codegen_assign(Node *n) {
   const char *name = n->childs->data[0].str;
   Symbol *s = sym_lookup(name);
   if (!s) {
-    fprintf(stderr, "codegen error: undefined variable '%s'\n", name);
-    exit(1);
+    error("codegen error: undefined variable '%s'\n", name);
+    
     return NULL;
   }
 
   Node *rhs = &n->childs->data[2];
 
-  /* ── Переприсваивание алиасов ──────────────────────────────────────────
-   *
-   *  b = c      (без &)  →  зависимая ссылка:
-   *    если b уже is_ref — обновляем хранимый указатель на alloca c
-   *    если b обычный ptr — делаем стандартный store(load(c), b)
-   *
-   *  b = &expr           →  слабая ссылка (snapshot):
-   *    если b is_ref — сбрасываем зависимость, копируем текущее значение
-   *      (меняем тип alloca нельзя, поэтому переопределяем как store-of-value)
-   *    если b обычный ptr — store(value_of_expr, b)
-   * ──────────────────────────────────────────────────────────────────── */
+  int rhs_is_weak = (rhs->type == NODE_UNOP && strcmp(rhs->str, "!!") == 0);
+  
+  Node *rhs_inner = rhs_is_weak
+      ? (rhs->childs->size > 0 ? &rhs->childs->data[0] : NULL)
+      : rhs;
 
-  int rhs_is_weak = (rhs->type == NODE_UNOP && strcmp(rhs->str, "&") == 0);
-
-  if (s->is_ref) {
-    if (!rhs_is_weak) {
-      /* b = c  →  обновить зависимость: сохранить alloca источника */
-      if (rhs->type == NODE_VAR) {
-        Symbol *src = sym_lookup(rhs->str);
-        if (src) {
-          LLVMValueRef src_addr = src->is_ref
-              ? LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), src->value, "ref_src")
-              : src->value;
-          LLVMBuildStore(builder, src_addr, s->value);
-          return src_addr;
-        }
-      }
-      /* Нераспознанный RHS для зависимой ссылки — ошибка */
-      fprintf(stderr, "codegen error: dependent ref '%s' can only be reassigned to a variable (use & for snapshot)\n", name);
-      exit(1);
-    } else {
-      /* b = &expr  →  слабая копия: вычислить значение RHS и записать
-       * через хранимый указатель (перезаписываем *b = val),
-       * либо если хотим отвязать — store нового значения прямо в *ptr */
-      Node *inner = (rhs->childs->size > 0) ? &rhs->childs->data[0] : NULL;
-      if (!inner) { fprintf(stderr, "codegen error: & without operand\n"); exit(1); }
-      LLVMValueRef val = codegen_node(inner);
-      if (!val) return NULL;
-      /* Получаем текущий указатель цели и записываем туда snapshot */
-      LLVMValueRef inner_ptr = LLVMBuildLoad2(builder, LLVMPointerTypeInContext(ctx, 0), s->value, "ref_ptr");
-      val = coerce_to(val, s->type);
-      LLVMBuildStore(builder, val, inner_ptr);
-      return val;
+  if (!rhs_is_weak && rhs_inner && rhs_inner->type == NODE_INDEX &&
+      LLVMGetTypeKind(s->type) == LLVMPointerTypeKind) {
+    Node *arr   = &rhs_inner->childs->data[0];
+    Node *inode = &rhs_inner->childs->data[1];
+    Symbol *base_sym = sym_lookup(arr->str);
+    if (base_sym && LLVMGetTypeKind(base_sym->type) == LLVMPointerTypeKind) {
+      LLVMValueRef idx_val = codegen_node(inode);
+      idx_val = coerce_to(idx_val, LLVMInt32TypeInContext(ctx));
+      return idx_val;
     }
   }
 
-  /* ── Обычная переменная ─────────────────────────────────────────────── */
-
   if (rhs_is_weak) {
-    /* b = &expr  →  snapshot: вычислить выражение внутри & и сохранить */
+    
     Node *inner = (rhs->childs->size > 0) ? &rhs->childs->data[0] : NULL;
-    if (!inner) { fprintf(stderr, "codegen error: & without operand\n"); exit(1); }
-    rhs = inner;  /* снимаем &, дальше обрабатываем как обычный RHS */
+    if (!inner) { error("codegen error: & without operand\n");  }
+    rhs = inner;
   }
 
   if (rhs->type == NODE_NEW) {
@@ -3316,8 +3112,8 @@ static LLVMValueRef codegen_index_assign(Node *n) {
   const char *name = n->childs->data[0].str;
   Symbol *s = sym_lookup(name);
   if (!s) {
-    fprintf(stderr, "codegen error: undefined variable '%s'\n", name);
-    exit(1);
+    error("codegen error: undefined variable '%s'\n", name);
+    
     return NULL;
   }
   LLVMValueRef idx = codegen_node(&n->childs->data[1]);
@@ -3325,10 +3121,11 @@ static LLVMValueRef codegen_index_assign(Node *n) {
   if (!idx)
     return NULL;
 
-  int is_ptr = LLVMGetTypeKind(s->type) == LLVMPointerTypeKind;
   LLVMTypeRef elem_type =
       s->elem_type ? s->elem_type : LLVMInt8TypeInContext(ctx);
   LLVMValueRef ptr;
+
+  int is_ptr = LLVMGetTypeKind(s->type) == LLVMPointerTypeKind;
 
   if (is_ptr) {
     LLVMValueRef base;
@@ -3391,19 +3188,19 @@ static LLVMValueRef codegen_extern_var_def(Node *n) {
   const char *type_str = n->childs->data[0].str;
   const char *name = n->childs->data[1].str;
 
-  // Парсим типы
+  
   LLVMTypeRef lltype = llvm_type_from_str(type_str);
   LLVMTypeRef elem_type = elem_type_for(type_str);
 
-  // Проверяем, не объявлялась ли переменная ранее
+  
   LLVMValueRef global_var = LLVMGetNamedGlobal(mod, name);
   if (!global_var) {
     global_var = LLVMAddGlobal(mod, lltype, name);
-    // Главное отличие: говорим LLVM, что переменная реализована снаружи
+    
     LLVMSetLinkage(global_var, LLVMExternalLinkage);
   }
 
-  // Регистрируем в нашей таблице символов
+  
   if (*sym_count < MAX_SYMS) {
     strncpy(sym_table[*sym_count].name, name, 63);
     sym_table[*sym_count].value = global_var;
@@ -3412,7 +3209,7 @@ static LLVMValueRef codegen_extern_var_def(Node *n) {
     sym_table[*sym_count].fn_type = parse_ftype_str(type_str);
     sym_table[*sym_count].is_func = 0;
     sym_table[*sym_count].is_vla = 0;
-    sym_table[*sym_count - 1].is_unsigned = is_type_unsigned(type_str);
+    sym_table[*sym_count].is_unsigned = is_type_unsigned(type_str);
     (*sym_count)++;
   }
   
@@ -3420,7 +3217,7 @@ static LLVMValueRef codegen_extern_var_def(Node *n) {
 }
 
 static LLVMValueRef codegen_cast(Node *n) {
-  /* NODE_CAST: str = target type string, childs[0] = expression to cast */
+  
   if (!n->childs || n->childs->size == 0)
     return NULL;
   LLVMValueRef val = codegen_node(&n->childs->data[0]);
@@ -3429,7 +3226,7 @@ static LLVMValueRef codegen_cast(Node *n) {
   const char *type_str = n->str;
   if (!type_str || type_str[0] == '\0')
     return val;
-  /* Strip autodel:/const: prefix if somehow present */
+  
   if (strncmp(type_str, "autodel:", 8) == 0) type_str += 8;
   if (strncmp(type_str, "const:",   6) == 0) type_str += 6;
   LLVMTypeRef target = llvm_type_from_str(type_str);
@@ -3442,7 +3239,7 @@ static LLVMValueRef codegen_cast(Node *n) {
   LLVMTypeKind src_kind = LLVMGetTypeKind(src);
   LLVMTypeKind dst_kind = LLVMGetTypeKind(target);
 
-  /* int <-> int */
+  
   if (src_kind == LLVMIntegerTypeKind && dst_kind == LLVMIntegerTypeKind) {
     unsigned src_bits = LLVMGetIntTypeWidth(src);
     unsigned dst_bits = LLVMGetIntTypeWidth(target);
@@ -3452,30 +3249,30 @@ static LLVMValueRef codegen_cast(Node *n) {
       return LLVMBuildTrunc(builder, val, target, "cast_trunc");
     return val;
   }
-  /* float -> int */
+  
   if (type_is_float(src) && dst_kind == LLVMIntegerTypeKind)
     return LLVMBuildFPToSI(builder, val, target, "cast_fp2si");
-  /* int -> float */
+  
   if (src_kind == LLVMIntegerTypeKind && type_is_float(target))
     return LLVMBuildSIToFP(builder, val, target, "cast_si2fp");
-  /* float -> float */
+  
   if (type_is_float(src) && type_is_float(target)) {
     if (src == LLVMFloatTypeInContext(ctx) && target == LLVMDoubleTypeInContext(ctx))
       return LLVMBuildFPExt(builder, val, target, "cast_fpext");
     if (src == LLVMDoubleTypeInContext(ctx) && target == LLVMFloatTypeInContext(ctx))
       return LLVMBuildFPTrunc(builder, val, target, "cast_fptrunc");
   }
-  /* int -> ptr */
+  
   if (src_kind == LLVMIntegerTypeKind && dst_kind == LLVMPointerTypeKind)
     return LLVMBuildIntToPtr(builder, val, target, "cast_i2p");
-  /* ptr -> int */
+  
   if (src_kind == LLVMPointerTypeKind && dst_kind == LLVMIntegerTypeKind)
     return LLVMBuildPtrToInt(builder, val, target, "cast_p2i");
-  /* ptr -> ptr (opaque) */
+  
   if (src_kind == LLVMPointerTypeKind && dst_kind == LLVMPointerTypeKind)
-    return val; /* opaque pointers are the same in LLVM opaque-ptr mode */
+    return val;
 
-  return val; /* fallback: no-op */
+  return val;
 }
 
 static LLVMValueRef get_coro_resume_intr(LLVMModuleRef M, LLVMContextRef ctx) {
@@ -3508,12 +3305,12 @@ static LLVMValueRef get_coro_destroy_intr(LLVMModuleRef M, LLVMContextRef ctx) {
     return f;
 }
 
-/* fl_Builder.c */
+
 
 static void emit_coro_runtime(LLVMModuleRef M, LLVMContextRef ctx, LLVMBuilderRef B) {
     LLVMTypeRef i8ptr = LLVMPointerType(LLVMInt8TypeInContext(ctx), 0);
     
-    // --- 1. _coro_resume(handle) ---
+    
     LLVMTypeRef res_ty = LLVMFunctionType(LLVMVoidTypeInContext(ctx), &i8ptr, 1, 0);
     LLVMValueRef res_fn = LLVMAddFunction(M, "_coro_resume", res_ty);
     LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(ctx, res_fn, "entry");
@@ -3522,7 +3319,7 @@ static void emit_coro_runtime(LLVMModuleRef M, LLVMContextRef ctx, LLVMBuilderRe
     LLVMBuildCall2(B, LLVMGlobalGetValueType(get_coro_resume_intr(M, ctx)), get_coro_resume_intr(M, ctx), &h, 1, "");
     LLVMBuildRetVoid(B);
 
-    // --- 2. _coro_done(handle) -> i1 ---
+    
     LLVMTypeRef done_ty = LLVMFunctionType(LLVMInt1TypeInContext(ctx), &i8ptr, 1, 0);
     LLVMValueRef done_fn = LLVMAddFunction(M, "_coro_done", done_ty);
     entry = LLVMAppendBasicBlockInContext(ctx, done_fn, "entry");
@@ -3531,7 +3328,7 @@ static void emit_coro_runtime(LLVMModuleRef M, LLVMContextRef ctx, LLVMBuilderRe
     LLVMValueRef is_done = LLVMBuildCall2(B, LLVMGlobalGetValueType(get_coro_done_intr(M, ctx)), get_coro_done_intr(M, ctx), &h, 1, "is_done");
     LLVMBuildRet(B, is_done);
 
-    // --- 3. _coro_wait(handle) -> Блокирующий планировщик для одного Future ---
+    
     LLVMTypeRef wait_ty = LLVMFunctionType(LLVMVoidTypeInContext(ctx), &i8ptr, 1, 0);
     LLVMValueRef wait_fn = LLVMAddFunction(M, "_coro_wait", wait_ty);
     LLVMBasicBlockRef w_entry = LLVMAppendBasicBlockInContext(ctx, wait_fn, "entry");
@@ -3566,8 +3363,8 @@ static void emit_coro_runtime(LLVMModuleRef M, LLVMContextRef ctx, LLVMBuilderRe
 static LLVMValueRef codegen_node(Node *n) {
   if (!n)
     return NULL;
-  fprintf(stderr, "DEBUG codegen_node: type=%d str='%s'\n", n->type,
-          n->str ? n->str : "(null)");
+  debug("DEBUG codegen in %s:\n\tat [line: %i; col: %i] => node '%s' (type: %i)\n",
+        n->begin.file, n->begin.line, n->begin.col, n->str, n->type);
   LLVMBasicBlockRef cur = LLVMGetInsertBlock(builder);
   LLVMValueRef func = cur ? LLVMGetBasicBlockParent(cur) : NULL;
   switch (n->type) {
@@ -3583,26 +3380,26 @@ static LLVMValueRef codegen_node(Node *n) {
     return codegen_index(n);
   case NODE_VAR_DEF:
     return codegen_var_def(n);
-  case NODE_ASYNC_FUNC_DEF: /* ДОБАВЛЕНО */
-  case NODE_AWAIT_FUNC_DEF: /* ДОБАВЛЕНО */
+  case NODE_ASYNC_FUNC_DEF:
+  case NODE_AWAIT_FUNC_DEF:
   case NODE_FUNC_DEF:
     return codegen_func_def(n);
   case NODE_AWAIT_CALL: {
-      // 1. Генерируем обычный вызов (он вернет i8* handle)
+      
       n->type = NODE_FUNC_CALL;
       LLVMValueRef handle = codegen_func_call(n);
       
-      // 2. Находим наш сгенерированный _coro_wait
+      
       LLVMValueRef wait_fn = LLVMGetNamedFunction(mod, "_coro_wait");
       if (wait_fn && handle) {
-          // 3. Вставляем вызов ожидания
+          
           LLVMBuildCall2(builder, LLVMGlobalGetValueType(wait_fn), wait_fn, &handle, 1, "");
       }
       
-      // Возвращаем handle (на случай если программист хочет его сохранить)
-      return handle; 
+      
+      return handle;
   }
-  case NODE_ASYNC_CALL:      /* ДОБАВЛЕНО */
+  case NODE_ASYNC_CALL:
   case NODE_FUNC_CALL:
     return codegen_func_call(n);
   case NODE_SCOPE:
@@ -3679,14 +3476,12 @@ static LLVMValueRef codegen_node(Node *n) {
   case NODE_CAST:
     return codegen_cast(n);
   case NODE_TYPEDEF:
-    /* typedef <original_type> <alias_name>
-     * childs[0] = NODE_TYPE (original), childs[1] = NODE_IDENT (alias) */
     if (n->childs && n->childs->size >= 2) {
       const char *original = n->childs->data[0].str;
       const char *alias    = n->childs->data[1].str;
       if (original && alias) {
         typedef_push(alias, original);
-        /* Если оригинал — известный LLVM-тип, регистрируем псевдоним */
+        
         LLVMTypeRef orig_t = type_lookup(original);
         if (!orig_t) orig_t = llvm_type_from_str(original);
         if (orig_t) type_push(alias, orig_t);
@@ -3722,7 +3517,6 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
     external_sym_count = *sym_c;
   }
 
-  // Создаем глобальный контекст и таблицы типов ТОЛЬКО ОДИН РАЗ
   if (!ctx) {
       ctx = LLVMContextCreate();
       
@@ -3739,7 +3533,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
       typedef_table = calloc(max_typedefs, sizeof(TypedefEntry));
   }
 
-  // Имя модуля берем из out_file, чтобы они не конфликтовали
+  
   mod = LLVMModuleCreateWithNameInContext(out_file, ctx);
   builder = LLVMCreateBuilderInContext(ctx);
 
@@ -3751,24 +3545,24 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
           Symbol *es = &ext_table[i];
           
           if (es->is_func) {
-              // Создаем заглушку внешней функции
+              
               LLVMValueRef f = LLVMGetNamedFunction(mod, es->name);
               if (!f) {
                   f = LLVMAddFunction(mod, es->name, es->type);
                   LLVMSetLinkage(f, LLVMExternalLinkage);
               }
-              // Добавляем в текущую таблицу
+              
               sym_push(es->name, f, es->type, 1);
               sym_table[*sym_count - 1].fn_type = es->fn_type;
               sym_table[*sym_count - 1].elem_type = es->elem_type;
           } else {
-              // Создаем заглушку глобальной переменной
+              
               LLVMValueRef g = LLVMGetNamedGlobal(mod, es->name);
               if (!g) {
                   g = LLVMAddGlobal(mod, es->type, es->name);
                   LLVMSetLinkage(g, LLVMExternalLinkage);
               }
-              // Добавляем в текущую таблицу
+              
               sym_push(es->name, g, es->type, 0);
               sym_table[*sym_count - 1].elem_type = es->elem_type;
               sym_table[*sym_count - 1].fn_type = es->fn_type;
@@ -3783,13 +3577,13 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
                            ? target_triple
                            : default_triple;
 
-  fprintf(stderr, "codegen: target triple = %s\n", triple);
+  debug("codegen: target triple = %s\n", triple);
   LLVMSetTarget(mod, triple);
 
   LLVMTargetRef target_ref = NULL;
   char *err_target = NULL;
   if (LLVMGetTargetFromTriple(triple, &target_ref, &err_target)) {
-    fprintf(stderr, "codegen: target error: %s\n", err_target);
+    error("codegen: target error: %s\n", err_target);
     LLVMDisposeMessage(err_target);
     LLVMDisposeMessage(default_triple);
     return NULL;
@@ -3800,7 +3594,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
       LLVMCodeModelDefault);
 
   if (!machine) {
-    fprintf(stderr, "codegen: failed to create target machine for '%s'\n",
+    error("codegen: failed to create target machine for '%s'\n",
             triple);
     LLVMDisposeMessage(default_triple);
     return NULL;
@@ -3811,7 +3605,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
   LLVMDisposeMessage(default_triple);
 
   {
-    /* Проверяем, нет ли уже malloc */
+    
     if (!LLVMGetNamedFunction(mod, "malloc")) {
       LLVMTypeRef malloc_params[] = {LLVMInt64TypeInContext(ctx)};
       LLVMTypeRef malloc_type =
@@ -3819,7 +3613,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
       LLVMAddFunction(mod, "malloc", malloc_type);
     }
 
-    /* Проверяем, нет ли уже free */
+    
     if (!LLVMGetNamedFunction(mod, "free")) {
       LLVMTypeRef free_params[] = {LLVMPointerTypeInContext(ctx, 0)};
       LLVMTypeRef free_type =
@@ -3829,35 +3623,6 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
   }
   emit_coro_runtime(mod, ctx, builder);
 
-  if (!g_T_struct_type) {
-    LLVMTypeRef ptr = LLVMPointerTypeInContext(ctx, 0);
-    LLVMTypeRef i64 = LLVMInt64TypeInContext(ctx);
-    LLVMTypeRef fields[] = {i64, i64, ptr, ptr, ptr};
-    g_T_struct_type = LLVMStructCreateNamed(ctx, "_T");
-    LLVMStructSetBody(g_T_struct_type, fields, 5, 0);
-    type_push("_T", g_T_struct_type);
-
-    const char *prims[] = {"int",   "short",  "long", "char",
-                           "float", "double", NULL};
-    long prim_sizes[] = {4, 2, 8, 1, 4, 8};
-    for (int pi = 0; prims[pi]; pi++) {
-      char gname[32];
-      snprintf(gname, sizeof(gname), "_T_%s", prims[pi]);
-      
-      LLVMValueRef gvar = LLVMGetNamedGlobal(mod, gname);
-      if (!gvar) {
-        gvar = LLVMAddGlobal(mod, g_T_struct_type, gname);
-        LLVMValueRef elems[] = {LLVMConstInt(i64, prim_sizes[pi], 0),
-                                LLVMConstInt(i64, djb2(prims[pi]), 0),
-                                LLVMConstNull(ptr), LLVMConstNull(ptr),
-                                LLVMConstNull(ptr)};
-        LLVMSetInitializer(gvar, LLVMConstNamedStruct(g_T_struct_type, elems, 5));
-        LLVMSetGlobalConstant(gvar, 1);
-        LLVMSetLinkage(gvar, LLVMLinkOnceAnyLinkage);
-      }
-    }
-  }
-
   for (unsigned long long j = 0; j < nodes->size; j++) {
     if (nodes->data[j].type == NODE_STRUCT_DEF || nodes->data[j].type == NODE_EXTERN_STRUCT_DEF) {
       Node *n = &nodes->data[j];
@@ -3865,6 +3630,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
         const char *sname = n->str;
         char base[64];
         const char *delim = strchr(sname, '<');
+
         if (delim) {
           int len = delim - sname;
           strncpy(base, sname, len);
@@ -3904,7 +3670,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
 
   char *err_msg = NULL;
   if (LLVMVerifyModule(mod, LLVMPrintMessageAction, &err_msg)) {
-    fprintf(stderr, "codegen: module verification failed\n");
+    error("codegen: module verification failed\n");
     LLVMDisposeMessage(err_msg);
   }
 
@@ -3915,9 +3681,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
     );
     if (err != LLVMErrorSuccess) {
       char *msg = LLVMGetErrorMessage(err);
-      printf("codegen: optimization error: %s\n", msg);
-      LLVMDisposeErrorMessage(msg);
-      exit(1);
+      error("codegen: optimization error: %s\n", msg);
     }
   } else {
     LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
@@ -3926,9 +3690,8 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
     );
     if (err != LLVMErrorSuccess) {
       char *msg = LLVMGetErrorMessage(err);
-      printf("codegen: optimization error: %s\n", msg);
+      error("codegen: optimization error: %s\n", msg);
       LLVMDisposeErrorMessage(msg);
-      exit(1);
     }
   }
 
@@ -3942,7 +3705,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
         fputs(ir, f);
         fclose(f);
       }
-      fprintf(stderr, "codegen: wrote IR '%s'\n", ir_file);
+      debug("codegen: wrote IR '%s'\n", ir_file);
       LLVMDisposeMessage(ir);
     }
   }
@@ -3953,15 +3716,15 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
   char *emit_err = NULL;
   if (LLVMTargetMachineEmitToFile(machine, mod, obj_file, LLVMObjectFile,
                                   &emit_err)) {
-    fprintf(stderr, "codegen: emit error: %s\n", emit_err);
+    debug("codegen: emit error: %s\n", emit_err);
     LLVMDisposeMessage(emit_err);
   } else {
-    fprintf(stderr, "codegen: wrote object '%s'\n", obj_file);
+    debug("codegen: wrote object '%s'\n", obj_file);
 
     int has_main = (LLVMGetNamedFunction(mod, "main") != NULL);
 
     if (g_is_import || !has_main) {
-        fprintf(stderr, "codegen: no 'main' function found or module is imported, skipping linking (module built as .o).\n");
+        error("codegen: no 'main' function found or module is imported, skipping linking (module built as .o).\n");
     } else {
         int import_count = 0;
         const char **import_objects = preprocess_get_imports(&import_count);
@@ -3982,9 +3745,9 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
         }
         int ret = system(cmd);
         if (ret != 0)
-          fprintf(stderr, "codegen: linker failed (code %d)\n", ret);
+          error("codegen: linker failed (code %d)\n", ret);
         else
-          fprintf(stderr, "codegen: linked '%s'\n", out_file);
+          debug("codegen: linked '%s'\n", out_file);
     }
 
     int keep_objects = (flags & 0b0100);
@@ -4006,7 +3769,7 @@ void **codegen(vector_node *nodes, const char *out_file, void *sym, int *sym_c,
   LLVMDisposeTargetMachine(machine);
   LLVMDisposeBuilder(builder);
   LLVMDisposeModule(mod);
-  //LLVMContextDispose(ctx);
+  
 
   if (g_is_import) {
     void **ret = malloc(sizeof(void*) * 2);

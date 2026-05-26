@@ -4,10 +4,10 @@
 typedef struct vector_node vector_node;
 
 typedef enum {
-    TYPE_BASE,      // int, char, struct Foo
-    TYPE_PTR,       // *
-    TYPE_ARRAY,     // [N]
-    TYPE_FUNC       // (int, float)
+    TYPE_BASE,
+    TYPE_PTR,
+    TYPE_ARRAY,
+    TYPE_FUNC
 } TypeKind;
 
 typedef struct TypeInfo {
@@ -38,7 +38,7 @@ typedef enum {
     NODE_WHILE,
     NODE_PARAM,
     NODE_ARGS,
-    NODE_FUNC_CALL, 
+    NODE_FUNC_CALL,
     NODE_EOF,
     NODE_RETURN,
     NODE_ARRAY_SIZE,
@@ -75,20 +75,14 @@ typedef enum {
     NODE_EXTERN_VAR_DEF,
     NODE_EXTERN_STRUCT_DEF,
     NODE_CAST,
-    /* ── Coroutine nodes ── */
-    NODE_ASYNC_FUNC_DEF,      /* async void foo(...)  — fire-and-forget by default */
-    NODE_AWAIT_FUNC_DEF,      /* await void foo(...)  — blocking by default        */
-    NODE_CHANNEL_VAR_DEF,     /* channel int x = 0;   — writable by coroutines     */
-    NODE_ASYNC_CALL,          /* async foo(...)  — fire-and-forget call             */
-    NODE_AWAIT_CALL           /* await foo(...)  — blocking call                   */
+    
+    NODE_ASYNC_FUNC_DEF,
+    NODE_AWAIT_FUNC_DEF,
+    NODE_CHANNEL_VAR_DEF,
+    NODE_ASYNC_CALL,
+    NODE_AWAIT_CALL,
+    NODE_PHI
 } NodeType;
-
-typedef struct Node {
-    NodeType type;
-    vector_node *childs;
-    char *str;
-    TypeInfo *result_type;
-} Node;
 
 typedef enum {
     TOK_INT,
@@ -110,6 +104,26 @@ typedef struct {
     char      value[64];
     int       line;
     int       col;
+    char      file[512];
 } Token;
+
+typedef struct Node {
+    NodeType type;
+    vector_node *childs;
+    char *str;
+    TypeInfo *result_type;
+    Token begin;
+} Node;
+
+#define RED    "\x1B[31m"
+#define YELLOW "\x1B[33m"
+#define GREEN  "\x1B[32m"
+#define RESET  "\x1B[0m"
+
+void error(char *msg, ...);
+
+void warning(char *msg, ...);
+
+void debug(char *msg, ...);
 
 #endif

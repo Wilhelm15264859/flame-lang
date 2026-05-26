@@ -6,25 +6,26 @@
 const char *TWO_CHAR_OPSfl[] = {
         "==", "!=", "<=", ">=", "&&", "||", "++", "--",
         "->", "+=", "-=", "*=", "/=", "%=", "<<", ">>",
-        ((void*)0)
+        "!!",
+        NULL
     };
 const char SINGLE_OPSfl[] = "+-*/%=<>!&|^~?:.#$";
 
 const char *KEYWORDSfl[] = {
     "return", "struct", "sizeof", "x86", "new", "class", "static",
-    "for", "do", "if", "else", "while",  "delete",  "extern", "exception", "instruction", 
+    "for", "do", "if", "else", "while",  "delete",  "extern", "exception", "instruction",
     "check", "replace", "notdel", "enum", "const", "typedef",
     "async", "await", "channel",
 
     "sparc64", "sparc", "bpf", "msp430", "avr", "wasm64", "wasm32", "ppc64", "ppc", "mips64", "mips", "riscv64", "riscv32",
     "aarch64", "thumbeb", "thumb",  "armeb",  "arm", "i686", "i386", "x86_64",
-    ((void*)0)
+    NULL
 };
 
 const char *TYPESfl[] = {
-    "int", "short", "long", "char", "float", "double", "void", "T", "F", 
+    "int", "short", "long", "char", "float", "double", "void", "T", "F",
     "uint", "ushort", "ulong", "uchar",
-    ((void*)0)
+    NULL
 };
 
 static int is_keyword(const char *s) {
@@ -44,6 +45,7 @@ typedef struct {
     int         pos;
     int         line;
     int         col;
+    char        file[512];
 } Lexer;
 
 static void lexer_init(Lexer *lex, const char *src) {
@@ -51,6 +53,7 @@ static void lexer_init(Lexer *lex, const char *src) {
     lex->pos  = 0;
     lex->line = 1;
     lex->col  = 1;
+    lex->file[0] = '\0';
 }
 
 static char peek(Lexer *lex) {
@@ -60,13 +63,64 @@ static char peek(Lexer *lex) {
 static char advance(Lexer *lex) {
     char c = lex->src[lex->pos++];
     if (c == '\n') { lex->line++; lex->col = 1; }
-    else            { lex->col++; }
+    else lex->col++;
     return c;
 }
 
 static void skip_whitespace_comments(Lexer *lex) {
     while (1) {
         while (isspace(peek(lex))) advance(lex);
+
+        if (peek(lex) == '#') {
+            int saved_pos  = lex->pos;
+            int saved_line = lex->line;
+            int saved_col  = lex->col;
+
+            advance(lex);
+            while (peek(lex) == ' ' || peek(lex) == '\t') advance(lex);
+
+            char dir[8]; int di = 0;
+            while (isalpha((unsigned char)peek(lex)) && di < 7)
+                dir[di++] = advance(lex);
+            dir[di] = '\0';
+
+            if (strcmp(dir, "line") == 0) {
+                while (peek(lex) == ' ' || peek(lex) == '\t') advance(lex);
+
+                int new_line = 0;
+                while (isdigit((unsigned char)peek(lex)))
+                    new_line = new_line * 10 + (advance(lex) - '0');
+
+                while (peek(lex) == ' ' || peek(lex) == '\t') advance(lex);
+
+                if (peek(lex) == '"') {
+                    advance(lex);
+                    int fi = 0;
+                    while (peek(lex) && peek(lex) != '"' && peek(lex) != '\n') {
+                        if (fi < (int)sizeof(lex->file) - 1)
+                            lex->file[fi++] = advance(lex);
+                        else
+                            advance(lex);
+                    }
+                    lex->file[fi] = '\0';
+                    if (peek(lex) == '"') advance(lex);
+                }
+
+                while (peek(lex) && peek(lex) != '\n') advance(lex);
+                if (peek(lex) == '\n') advance(lex);
+
+                if (new_line > 0) {
+                    lex->line = new_line;
+                    lex->col  = 1;
+                }
+                continue;
+            } else {
+                lex->pos  = saved_pos;
+                lex->line = saved_line;
+                lex->col  = saved_col;
+                break;
+            }
+        }
 
         if (peek(lex) == '/' && lex->src[lex->pos + 1] == '/') {
             while (peek(lex) && peek(lex) != '\n') advance(lex);
@@ -97,6 +151,8 @@ static Token next_token(Lexer *lex) {
 
     tok.line = lex->line;
     tok.col  = lex->col;
+    strncpy(tok.file, lex->file, sizeof(tok.file) - 1);
+    tok.file[sizeof(tok.file) - 1] = '\0';
 
     char c = peek(lex);
 
@@ -111,11 +167,9 @@ static Token next_token(Lexer *lex) {
         char val = 0;
         if (peek(lex) == '\\') {
             advance(lex);
-            if (peek(lex) == '\0') {
-                fprintf(stderr, "Lexer ERROR: unexpected EOF after '\\'\n");
-                tok.type = TOK_ERROR;
-                return tok;
-            }
+
+            if (peek(lex) == '\0') error("Error: unexpected EOF after '\\'\n");
+
             char esc = advance(lex);
             switch (esc) {
                 case 'n':  val = '\n'; break;
@@ -130,7 +184,7 @@ static Token next_token(Lexer *lex) {
             val = advance(lex);
         }
         if (peek(lex) == '\'') advance(lex);
-        else fprintf(stderr, "Lexer WARNING: unclosed char literal at line %d\n", lex->line);
+        else error("Error: unclosed char literal at line %d\n", lex->line);
         snprintf(tok.value, sizeof(tok.value), "%dc", (unsigned char)val);
         tok.type = TOK_INT;
         return tok;
@@ -140,11 +194,9 @@ static Token next_token(Lexer *lex) {
         while (peek(lex) && peek(lex) != '"') {
             if (peek(lex) == '\\') {
                 advance(lex);
-                if (peek(lex) == '\0') {
-                    fprintf(stderr, "Lexer ERROR: unexpected EOF after '\\'\n");
-                    tok.type = TOK_ERROR;
-                    return tok;
-                }
+
+                if (peek(lex) == '\0') error("Lexer ERROR: unexpected EOF after '\\'\n");
+                
                 char esc = advance(lex);
                 switch (esc) {
                     case 'n':  tok.value[i++] = '\n'; break;
@@ -208,11 +260,9 @@ static Token next_token(Lexer *lex) {
             tok.value[i++] = advance(lex);
         tok.value[i] = '\0';
         if (tok.value[0] == '_') {
-            fprintf(stderr, "Lexer ERROR: identifiers starting with '_' are reserved "
+            error("Lexer ERROR: identifiers starting with '_' are reserved "
                     "(mangling namespace), got '%s' at line %d col %d\n",
                     tok.value, lex->line, lex->col);
-            tok.type = TOK_ERROR;
-            return tok;
         }
         if (is_type(tok.value))
             tok.type = TOK_TYPE;
@@ -270,7 +320,7 @@ static Token next_token(Lexer *lex) {
 
     tok.value[0] = advance(lex);
     tok.value[1] = '\0';
-    fprintf(stderr, "Lexer ERROR: unknown char '%c' (0x%02x) at line %d col %d\n",
+    error("Lexer ERROR: unknown char '%c' (0x%02x) at line %d col %d\n",
         c, (unsigned char)c, lex->line, lex->col);
     tok.type = TOK_ERROR;
     return tok;

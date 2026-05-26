@@ -5,22 +5,11 @@
 void out(char *msg) {
     int len = strlen(msg);
 
-    x86_64 mov rax, 1;
-    x86_64 mov rdi, 1;
-    x86_64 mov rsi, $msg;
-    x86_64 mov rdx, $len;
-    x86_64 syscall;
+    x86_64 syscall
+        : rcx r11
+        < rax(1) rdi(1) rsi(msg) rdx(len);
 }
-void outln(char *msg) {
-    msg = strcat(msg, "\n");
-    int len = strlen(msg);
 
-    x86_64 mov rax, 1;
-    x86_64 mov rdi, 1;
-    x86_64 mov rsi, $msg;
-    x86_64 mov rdx, $len;
-    x86_64 syscall;
-}
 char *in(int len) {
     char *buf;
 

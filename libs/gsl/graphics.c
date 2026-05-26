@@ -88,7 +88,7 @@ uint32_t findMemoryType(VkPhysicalDevice phDev, uint32_t typeFilter, VkMemoryPro
             (memProps.memoryTypes[i].propertyFlags & props) == props)
             return i;
     }
-    fprintf(stderr, "findMemoryType: no suitable memory type found\n");
+    error("findMemoryType: no suitable memory type found\n");
     err();
     return 0;
 }
@@ -99,7 +99,7 @@ VkShaderModule compileShader(const char* source, shaderc_shader_kind kind) {
         compiler, source, strlen(source), kind, "shader.glsl", "main", NULL);
 
     if (shaderc_result_get_compilation_status(result) != shaderc_compilation_status_success) {
-        fprintf(stderr, "Shader Error: %s\n", shaderc_result_get_error_message(result));
+        error("Shader Error: %s\n", shaderc_result_get_error_message(result));
         err();
     }
 
@@ -489,13 +489,13 @@ void initTextSystem(const char *font_path, int font_size)
     if (text_system_ready) return;
 
     if (!TTF_Init()) {
-        fprintf(stderr, "TTF_Init failed: %s\n", SDL_GetError());
+        error("TTF_Init failed: %s\n", SDL_GetError());
         return;
     }
 
     g_font.font = TTF_OpenFont(font_path, (float)font_size);
     if (!g_font.font) {
-        fprintf(stderr, "TTF_OpenFont('%s') failed: %s\n", font_path, SDL_GetError());
+        error("TTF_OpenFont('%s') failed: %s\n", font_path, SDL_GetError());
         return;
     }
 
@@ -555,7 +555,7 @@ void initTextSystem(const char *font_path, int font_size)
     vkUpdateDescriptorSets(device, 1, &wds, 0, NULL);
 
     text_system_ready = 1;
-    fprintf(stderr, "Text system ready (font '%s', size %d)\n", font_path, font_size);
+    error("Text system ready (font '%s', size %d)\n", font_path, font_size);
 }
 
 void shutdownTextSystem(void)
@@ -683,7 +683,7 @@ void graphicInit(SDL_Window* win) {
     uint32_t extensionCount = 0;
     const char * const *sdl_exts = SDL_Vulkan_GetInstanceExtensions(&extensionCount);
     if (!sdl_exts) {
-        fprintf(stderr, "SDL_Vulkan_GetInstanceExtensions failed: %s\n", SDL_GetError());
+        error("SDL_Vulkan_GetInstanceExtensions failed: %s\n", SDL_GetError());
         err();
     }
 
@@ -702,19 +702,19 @@ void graphicInit(SDL_Window* win) {
     VkResult res;
     res = vkCreateInstance(&cinfo, NULL, &inst);
     if (res != VK_SUCCESS) {
-        fprintf(stderr, "vkCreateInstance failed: %d\n", res);
+        error("vkCreateInstance failed: %d\n", res);
         err();
     }
 
     if (!SDL_Vulkan_CreateSurface(win, inst, NULL, &surf)) {
-        fprintf(stderr, "SDL_Vulkan_CreateSurface failed: %s\n", SDL_GetError());
+        error("SDL_Vulkan_CreateSurface failed: %s\n", SDL_GetError());
         err();
     }
 
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(inst, &deviceCount, NULL);
     if (deviceCount == 0) {
-        fprintf(stderr, "No Vulkan physical devices found\n");
+        error("No Vulkan physical devices found\n");
         err();
     }
     VkPhysicalDevice *devices = malloc(sizeof(VkPhysicalDevice) * deviceCount);
@@ -725,7 +725,7 @@ void graphicInit(SDL_Window* win) {
     /* Print device name for debugging */
     VkPhysicalDeviceProperties devProps;
     vkGetPhysicalDeviceProperties(phDevice, &devProps);
-    fprintf(stderr, "Using GPU: %s\n", devProps.deviceName);
+    error("Using GPU: %s\n", devProps.deviceName);
 
     uint32_t queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(phDevice, &queueFamilyCount, NULL);
@@ -745,10 +745,10 @@ void graphicInit(SDL_Window* win) {
     free(queueFamilies);
 
     if (graphicsFamily < 0) {
-        fprintf(stderr, "No suitable queue family found\n");
+        error("No suitable queue family found\n");
         err();
     }
-    fprintf(stderr, "Queue family index: %d\n", graphicsFamily);
+    error("Queue family index: %d\n", graphicsFamily);
 
     float queuePrior = 1.0f;
     VkDeviceQueueCreateInfo qcInfo = {
