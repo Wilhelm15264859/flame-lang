@@ -958,7 +958,7 @@ static void collect_slots_in_scope(vector_node *nodes, int start, int end,
         const char *varname  = n->childs->data[1].str ? n->childs->data[1].str : "";
         if (!varname[0]) continue;
 
-        if (strncmp(type_str, "notdel:", 7) == 0) continue; // notdel — не наш, не трогаем
+        if (strncmp(type_str, "notdel:", 7) == 0) continue;
         int is_autodel = (strncmp(type_str, "autodel:", 8) == 0);
         Node *init = (n->childs->size >= 3) ? &n->childs->data[2] : NULL;
 

@@ -1390,7 +1390,7 @@ char *preprocess(const char *source, const char *base_dir, const char *input_fil
 
     inject_target_defines(&ctx);
 
-    /* Emit #line for the root file so all its tokens carry the correct filename */
+    
     if (ctx.current_file[0]) {
         char lm[640];
         snprintf(lm, sizeof(lm), "#line 1 \"%s\"\n", ctx.current_file);

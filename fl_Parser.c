@@ -151,12 +151,12 @@ static void build_mangled_name(const char *base,
         const char *t = param_types[i];
         if (strncmp(t, "autodel:", 8) == 0) t += 8;
 
-        /* count stars anywhere in the type string */
+        
         int stars = 0;
         for (const char *q = t; *q; q++)
             if (*q == '*') stars++;
 
-        /* lifetime is the last char if it is a/b/c AND there are stars */
+        
         int tlen = (int)strlen(t);
         char lt = 'c';
         int has_explicit_lt = 0;
@@ -169,17 +169,17 @@ static void build_mangled_name(const char *base,
         }
 
         if (stars > 0) {
-            /* one underscore per star */
+            
             for (int s = 0; s < stars && pos < out_size - 1; s++)
                 out[pos++] = '_';
             if (pos < out_size - 1) out[pos++] = lt;
         }
 
-        /* write base type: skip '*', ' ', and the trailing lifetime char */
+        
         for (int qi = 0; t[qi] && pos < out_size - 1; qi++) {
             if (t[qi] == '*') continue;
             if (t[qi] == ' ') continue;
-            if (has_explicit_lt && t[qi + 1] == '\0') continue; /* skip trailing lifetime */
+            if (has_explicit_lt && t[qi + 1] == '\0') continue; 
             out[pos++] = (char)tolower((unsigned char)t[qi]);
         }
     }
@@ -193,7 +193,7 @@ static void normalize_type(const char *src, char *out, int out_size) {
     int stars = 0;
     for (const char *q = src; *q; q++) if (*q == '*') stars++;
 
-    /* lifetime is the last char if it is a/b/c AND there are stars */
+    
     int slen = (int)strlen(src);
     char lt = 'c';
     int has_explicit_lt = 0;
@@ -215,7 +215,7 @@ static void normalize_type(const char *src, char *out, int out_size) {
 
     for (int qi = 0; src[qi] && j < out_size - 1; qi++) {
         if (src[qi] == '*' || src[qi] == ' ') continue;
-        if (has_explicit_lt && src[qi + 1] == '\0') continue; /* skip trailing lifetime */
+        if (has_explicit_lt && src[qi + 1] == '\0') continue; 
         out[j++] = (char)tolower((unsigned char)src[qi]);
     }
     out[j] = '\0';
@@ -1658,7 +1658,7 @@ Node parseAsm(Token arch_tok) {
             if (inputs_str[0]) strncat(inputs_str, ",", sizeof(inputs_str) - strlen(inputs_str) - 1);
             strncat(inputs_str, reg_tok.value, sizeof(inputs_str) - strlen(inputs_str) - 1);
             strncat(inputs_str, ":",           sizeof(inputs_str) - strlen(inputs_str) - 1);
-            /* prefix numeric literals with '#' so codegen can tell them apart from variables */
+            
             if (var_tok.type == TOK_INT) {
                 strncat(inputs_str, "#", sizeof(inputs_str) - strlen(inputs_str) - 1);
             }
@@ -3638,7 +3638,7 @@ static Node *parse_infix(Node *left, Token op) {
     if (strcmp(op.value, "(") == 0) {
         Node *call = make_node(NODE_FUNC_CALL, left->str);
 
-        /* prepend an IDENT child (mirrors parseFuncCallInner layout) */
+        
         Node *name_node = make_node(NODE_IDENT, left->str);
         vn_push_back(call->childs, *name_node); free(name_node);
 
@@ -3652,7 +3652,7 @@ static Node *parse_infix(Node *left, Token op) {
         advance();
         vn_push_back(call->childs, *args); free(args);
 
-        /* resolve overload exactly like parseFuncCallInner does */
+        
         {
             const char *base = left->str;
             Node *args_in_call = &call->childs->data[1];
@@ -3666,7 +3666,7 @@ static Node *parse_infix(Node *left, Token op) {
                 strcpy(call->childs->data[0].str, resolved);
                 debug("DEBUG parse_infix funcall: resolved '%s' -> '%s'\n", base, resolved);
 
-                /* insert parameter casts where needed */
+                
                 OverloadEntry *oe = NULL;
                 for (int oi = 0; oi < overload_count; oi++) {
                     if (strcmp(overload_table[oi].mangled, resolved) == 0) {

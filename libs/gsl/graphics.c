@@ -18,11 +18,11 @@ void err() {
     );
 }
 
-/* ================================================================== */
-/* Global Vulkan state                                                */
-/* ================================================================== */
 
-static uint8_t geom_verts[MAX_GEOM_VERTS * 12]; // 12 байт на одну вершину
+
+
+
+static uint8_t geom_verts[MAX_GEOM_VERTS * 12];
 static uint32_t geom_vert_count = 0;
 
 static VkBuffer       geom_vbuf        = VK_NULL_HANDLE;
@@ -59,15 +59,13 @@ VkBuffer vertexBuffer;
 VkDeviceMemory vertexBufferMemory;
 uint32_t vertexCount = 0;
 
-/* ================================================================== */
-/* Shared helpers                                                       */
-/* ================================================================== */
 
-// Глобальный якорь экрана (по умолчанию 0.5, 0.5 - центр)
+
+
+
 static float g_originAnchorX = 0.5f;
 static float g_originAnchorY = 0.5f;
 
-// Функция для установки системы координат
 void setGlobalOrigin(float anchorX, float anchorY) {
     g_originAnchorX = anchorX;
     g_originAnchorY = anchorY;
@@ -115,9 +113,9 @@ VkShaderModule compileShader(const char* source, shaderc_shader_kind kind) {
     return module;
 }
 
-/* ================================================================== */
-/* Text subsystem                                                       */
-/* ================================================================== */
+
+
+
 
 #define MAX_GLYPHS      128
 #define ATLAS_W         1024
@@ -168,7 +166,7 @@ static VkBuffer       text_vbuf        = VK_NULL_HANDLE;
 static VkDeviceMemory text_vbuf_memory = VK_NULL_HANDLE;
 static uint32_t       text_vbuf_size   = 0;
 
-/* ------------------------------------------------------------------ */
+
 
 static void text_create_image(uint32_t w, uint32_t h,
                                VkImage *img, VkDeviceMemory *mem)
@@ -480,9 +478,9 @@ static GlyphInfo *get_or_cache_glyph(FontState *fs, int cp)
     return gi;
 }
 
-/* ------------------------------------------------------------------ */
-/* Public text API                                                      */
-/* ------------------------------------------------------------------ */
+
+
+
 
 void initTextSystem(const char *font_path, int font_size)
 {
@@ -675,9 +673,9 @@ static void flush_text(VkCommandBuffer cmd)
     text_vert_count = 0;
 }
 
-/* ================================================================== */
-/* Main graphics init                                                   */
-/* ================================================================== */
+
+
+
 
 void graphicInit(SDL_Window* win) {
     uint32_t extensionCount = 0;
@@ -722,7 +720,7 @@ void graphicInit(SDL_Window* win) {
     phDevice = devices[0];
     free(devices);
 
-    /* Print device name for debugging */
+    
     VkPhysicalDeviceProperties devProps;
     vkGetPhysicalDeviceProperties(phDevice, &devProps);
     error("Using GPU: %s\n", devProps.deviceName);
@@ -734,7 +732,7 @@ void graphicInit(SDL_Window* win) {
 
     int graphicsFamily = -1;
     for (int i = 0; i < (int)queueFamilyCount; i++) {
-        /* Check both graphics and present support */
+        
         VkBool32 presentSupport = VK_FALSE;
         vkGetPhysicalDeviceSurfaceSupportKHR(phDevice, i, surf, &presentSupport);
         if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && presentSupport) {
@@ -776,15 +774,15 @@ void graphicInit(SDL_Window* win) {
     }
     vkGetDeviceQueue(device, graphicsFamily, 0, &gQueue);
 
-    /* Get actual window pixel size */
+    
     SDL_GetWindowSizeInPixels(win, &width, &height);
     fprintf(stderr, "Window size: %dx%d\n", width, height);
 
-    /* Query surface capabilities */
+    
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phDevice, surf, &caps);
 
-    /* Use currentExtent if valid, otherwise use window size */
+    
     if (caps.currentExtent.width != UINT32_MAX) {
         swapChainExtent = caps.currentExtent;
     } else {
@@ -797,12 +795,12 @@ void graphicInit(SDL_Window* win) {
     }
     fprintf(stderr, "Swapchain extent: %dx%d\n", swapChainExtent.width, swapChainExtent.height);
 
-    /* Pick image count */
+    
     uint32_t minImageCount = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && minImageCount > caps.maxImageCount)
         minImageCount = caps.maxImageCount;
 
-    /* Query supported surface formats */
+    
     uint32_t formatCount = 0;
     vkGetPhysicalDeviceSurfaceFormatsKHR(phDevice, surf, &formatCount, NULL);
     if (formatCount == 0) {
@@ -812,7 +810,7 @@ void graphicInit(SDL_Window* win) {
     VkSurfaceFormatKHR *formats = malloc(sizeof(VkSurfaceFormatKHR) * formatCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(phDevice, surf, &formatCount, formats);
 
-    /* Prefer B8G8R8A8_UNORM + SRGB_NONLINEAR, fall back to first available */
+    
     VkSurfaceFormatKHR chosenFormat = formats[0];
     for (uint32_t i = 0; i < formatCount; i++) {
         if (formats[i].format == VK_FORMAT_B8G8R8A8_UNORM &&
@@ -826,19 +824,13 @@ void graphicInit(SDL_Window* win) {
     fprintf(stderr, "Surface format: %d colorspace: %d\n",
             chosenFormat.format, chosenFormat.colorSpace);
 
-    /* Query present modes — prefer MAILBOX, fall back to FIFO */
+    
     uint32_t presentModeCount = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(phDevice, surf, &presentModeCount, NULL);
     VkPresentModeKHR *presentModes = malloc(sizeof(VkPresentModeKHR) * presentModeCount);
     vkGetPhysicalDeviceSurfacePresentModesKHR(phDevice, surf, &presentModeCount, presentModes);
     
     VkPresentModeKHR chosenPresentMode = VK_PRESENT_MODE_FIFO_KHR;
-    /*for (uint32_t i = 0; i < presentModeCount; i++) {
-        if (presentModes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
-            chosenPresentMode = VK_PRESENT_MODE_MAILBOX_KHR;
-            break;
-        }
-    }*/
     free(presentModes);
     fprintf(stderr, "Present mode: %d\n", chosenPresentMode);
 
@@ -852,7 +844,7 @@ void graphicInit(SDL_Window* win) {
         .imageArrayLayers = 1,
         .imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .preTransform     = caps.currentTransform,  /* use actual transform, not hardcoded */
+        .preTransform     = caps.currentTransform,  
         .compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode      = chosenPresentMode,
         .clipped          = VK_TRUE,
@@ -896,7 +888,7 @@ void graphicInit(SDL_Window* win) {
         .colorAttachmentCount = 1,
         .pColorAttachments    = &colorRef
     };
-    /* Subpass dependency to ensure layout transition happens at the right time */
+    
     VkSubpassDependency dependency = {
         .srcSubpass    = VK_SUBPASS_EXTERNAL,
         .dstSubpass    = 0,
@@ -963,7 +955,7 @@ void graphicInit(SDL_Window* win) {
     vkCreateSemaphore(device, &semInfo, NULL, &imageAvailableSemaphore);
     vkCreateSemaphore(device, &semInfo, NULL, &renderFinishedSemaphore);
 
-    /* Geometry pipeline */
+    
     char vertSrc[512];
     snprintf(vertSrc, sizeof(vertSrc),
         "#version 450\n"
@@ -1076,9 +1068,9 @@ void graphicInit(SDL_Window* win) {
     fprintf(stderr, "graphicInit complete\n");
 }
 
-/* ================================================================== */
-/* drawFrame — geometry + text in one render pass                      */
-/* ================================================================== */
+
+
+
 
 static void flush_geometry(VkCommandBuffer cmd) {
     if (geom_vert_count == 0) return;
@@ -1129,13 +1121,13 @@ void drawFrame() {
     fprintf(stderr, "drawFrame called: vertexCount=%u\n", vertexCount);
     uint32_t imageIndex;
 
-    /* Wait for previous frame using this slot to finish */
-    /* We use a simple round-robin with a static frame index */
+    
+    
     static uint32_t currentFrame = 0;
 
     vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
-    /* Acquire next swapchain image — only once */
+    
     VkResult res = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX,
         imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
 
@@ -1164,10 +1156,10 @@ void drawFrame() {
 
     vkCmdBeginRenderPass(commandBuffers[imageIndex], &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
-    /* --- Geometry draw --- */
+    
     flush_geometry(commandBuffers[imageIndex]);
 
-    /* --- Text draw (same render pass, on top of geometry) --- */
+    
     flush_text(commandBuffers[imageIndex]);
 
     vkCmdEndRenderPass(commandBuffers[imageIndex]);
@@ -1194,9 +1186,9 @@ void drawFrame() {
     currentFrame = (currentFrame + 1) % imageCount;
 }
 
-/* ================================================================== */
-/* Vertex buffer management                                             */
-/* ================================================================== */
+
+
+
 
 void createVertexBuffer(void* vertices, uint32_t size) {
     fprintf(stderr, "createVertexBuffer called: size=%u\n", size);

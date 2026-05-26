@@ -282,12 +282,10 @@ static void sym_push(const char *name, LLVMValueRef val, LLVMTypeRef type,
 }
 
 static Symbol *sym_lookup(const char *name) {
-  /* exact match first */
   for (int j = *sym_count - 1; j >= 0; j--)
     if (strcmp(sym_table[j].name, name) == 0)
       return &sym_table[j];
 
-  /* fallback: match SSA-renamed symbol "name#N" for lookup by base name */
   size_t nlen = strlen(name);
   for (int j = *sym_count - 1; j >= 0; j--) {
     const char *sname = sym_table[j].name;
@@ -1033,7 +1031,7 @@ static LLVMValueRef codegen_scope(Node *n) {
   for (unsigned long long j = 0; j < n->childs->size; j++) {
     LLVMBasicBlockRef cur_bb = LLVMGetInsertBlock(builder);
     if (cur_bb && LLVMGetBasicBlockTerminator(cur_bb))
-      break; /* current block already has a terminator; stop emitting */
+      break;
     codegen_node(&n->childs->data[j]);
   }
   sym_restore(cp);
@@ -1046,7 +1044,6 @@ static LLVMValueRef codegen_return(Node *n) {
 
   if (n->childs->size == 0 || n->childs->data[0].type == NODE_UNDEF) {
     LLVMBuildRetVoid(builder);
-    /* open a dead block so subsequent auto-delete nodes don't corrupt the IR */
     LLVMBasicBlockRef dead = LLVMAppendBasicBlockInContext(ctx, func, "ret.dead");
     LLVMPositionBuilderAtEnd(builder, dead);
     return NULL;
@@ -1064,7 +1061,6 @@ static LLVMValueRef codegen_return(Node *n) {
   LLVMTypeRef ret_type = LLVMGetReturnType(ftype);
   val = coerce_to(val, ret_type);
   LLVMBuildRet(builder, val);
-  /* open a dead block so subsequent auto-delete nodes don't corrupt the IR */
   LLVMBasicBlockRef dead = LLVMAppendBasicBlockInContext(ctx, func, "ret.dead");
   LLVMPositionBuilderAtEnd(builder, dead);
   return NULL;
@@ -1290,7 +1286,7 @@ static LLVMValueRef codegen_func_def(Node *n) {
             scope->childs->data[j].str ? scope->childs->data[j].str : "(null)");
     LLVMBasicBlockRef cur_bb = LLVMGetInsertBlock(builder);
     if (cur_bb && LLVMGetBasicBlockTerminator(cur_bb))
-      break; /* block already terminated; skip remaining nodes */
+      break; 
     codegen_node(&scope->childs->data[j]);
   }
 
@@ -2385,7 +2381,7 @@ static LLVMValueRef codegen_asm(Node *n) {
 
         LLVMValueRef val;
         if (var[0] == '#') {
-          /* numeric literal constant encoded by parser as #<digits> */
+          
           long long imm = strtoll(var + 1, NULL, 0);
           val = LLVMConstInt(i64, (unsigned long long)imm, 0);
         } else {
